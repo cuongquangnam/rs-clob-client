@@ -248,7 +248,7 @@ impl ConnectionManager {
                 // Handle outgoing messages
                 Some(text) = sender_rx.recv() => {
                     let mut write_guard = write.lock().await;
-                    if write_guard.send(Message::Text(text)).await.is_err() {
+                    if write_guard.send(Message::Text(text.into())).await.is_err() {
                         break;
                     }
                 }
@@ -282,7 +282,7 @@ impl ConnectionManager {
             // Send PING
             let mut write_guard = write.lock().await;
             if write_guard
-                .send(Message::Text("PING".to_owned()))
+                .send(Message::Text("PING".into()))
                 .await
                 .is_err()
             {

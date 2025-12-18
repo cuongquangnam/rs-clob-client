@@ -59,7 +59,7 @@ impl MockWsServer {
                             msg = read.next() => {
                                 match msg {
                                     Some(Ok(Message::Text(text))) if text != "PING" => {
-                                        drop(sub_tx.send(text));
+                                        drop(sub_tx.send(text.to_string()));
                                     }
                                     Some(Ok(_)) => {}
                                     _ => break,
@@ -69,7 +69,7 @@ impl MockWsServer {
                             msg = msg_rx.recv() => {
                                 match msg {
                                     Ok(text) => {
-                                        if write.send(Message::Text(text)).await.is_err() {
+                                        if write.send(Message::Text(text.into())).await.is_err() {
                                             break;
                                         }
                                     }
