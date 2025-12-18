@@ -10,7 +10,31 @@ use crate::{
 };
 
 /// Authentication payload for user channel subscriptions.
-pub type AuthPayload = Credentials;
+///
+/// This is a dedicated struct for WebSocket authentication that intentionally
+/// serializes credential secrets. It is separate from [`Credentials`] to prevent
+/// accidental serialization of secrets in other contexts (logging, errors, etc.).
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AuthPayload {
+    api_key: String,
+    secret: String,
+    passphrase: String,
+}
+
+impl AuthPayload {
+    /// Create an auth payload from credentials.
+    ///
+    /// This explicitly extracts secrets for WebSocket authentication.
+    #[must_use]
+    pub fn from_credentials(credentials: &Credentials) -> Self {
+        Self {
+            api_key: credentials.key().to_string(),
+            secret: credentials.secret().to_owned(),
+            passphrase: credentials.passphrase().to_owned(),
+        }
+    }
+}
 
 /// Top-level WebSocket message wrapper.
 ///
@@ -608,13 +632,14 @@ mod tests {
 
     #[test]
     fn serialize_user_subscription_request() {
+        let credentials = Credentials::new(
+            ApiKey::nil(),
+            "test-secret".to_owned(),
+            "test-pass".to_owned(),
+        );
         let request = SubscriptionRequest::user(
             vec!["market1".to_owned()],
-            Credentials::new(
-                ApiKey::nil(),
-                "test-secret".to_owned(),
-                "test-pass".to_owned(),
-            ),
+            AuthPayload::from_credentials(&credentials),
         );
 
         let json = serde_json::to_string(&request).unwrap();
