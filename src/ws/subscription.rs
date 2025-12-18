@@ -14,9 +14,9 @@ use tokio::sync::broadcast::error::RecvError;
 use tracing::warn;
 
 use super::connection::ConnectionManager;
+use super::error::WsError;
 use super::messages::{AuthPayload, SubscriptionRequest, WsMessage};
 use crate::Result;
-use crate::error::Error;
 
 /// Information about an active subscription.
 #[non_exhaustive]
@@ -99,12 +99,13 @@ impl SubscriptionManager {
                                 }
                             }
                             Err(e) => {
-                                yield Err(Error::validation(e.to_string()));
+                                yield Err(WsError::InvalidMessage(e.to_string()).into());
                             }
                         }
                     }
                     Err(RecvError::Lagged(n)) => {
                         warn!("Subscription lagged, missed {n} messages");
+                        yield Err(WsError::Lagged { count: n }.into());
                     }
                     Err(RecvError::Closed) => {
                         break;
@@ -150,12 +151,13 @@ impl SubscriptionManager {
                                 }
                             }
                             Err(e) => {
-                                yield Err(Error::validation(e.to_string()));
+                                yield Err(WsError::InvalidMessage(e.to_string()).into());
                             }
                         }
                     }
                     Err(RecvError::Lagged(n)) => {
                         warn!("Subscription lagged, missed {n} messages");
+                        yield Err(WsError::Lagged { count: n }.into());
                     }
                     Err(RecvError::Closed) => {
                         break;

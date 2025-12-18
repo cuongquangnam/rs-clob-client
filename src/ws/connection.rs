@@ -347,7 +347,7 @@ impl ConnectionManager {
         let json = serde_json::to_string(message)?;
         self.sender_tx
             .send(json)
-            .map_err(|_e| Error::validation("Connection closed"))?;
+            .map_err(|_e| WsError::ConnectionClosed)?;
         Ok(())
     }
 
