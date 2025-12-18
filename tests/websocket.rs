@@ -107,7 +107,7 @@ impl MockWsServer {
     }
 }
 
-/// Example payloads from Polymarket API documentation.
+/// Example payloads from CLOB documentation.
 /// <https://docs.polymarket.com/developers/CLOB/websocket/market-channel>
 /// <https://docs.polymarket.com/developers/CLOB/websocket/user-channel>
 mod payloads {
