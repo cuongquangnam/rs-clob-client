@@ -8,10 +8,10 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use async_stream::stream;
-use dashmap::DashMap;
+use dashmap::{DashMap, DashSet};
 use futures::Stream;
 use tokio::sync::broadcast::error::RecvError;
-use tracing::warn;
+use tracing::{debug, warn};
 
 use super::connection::ConnectionManager;
 use super::error::WsError;
@@ -45,6 +45,8 @@ pub struct SubscriptionManager {
     connection: Arc<ConnectionManager>,
     active_subs: Arc<DashMap<String, SubscriptionInfo>>,
     interest: Arc<InterestTracker>,
+    subscribed_assets: DashSet<String>,
+    subscribed_markets: DashSet<String>,
 }
 
 impl SubscriptionManager {
@@ -55,6 +57,8 @@ impl SubscriptionManager {
             connection,
             active_subs: Arc::new(DashMap::new()),
             interest,
+            subscribed_assets: DashSet::new(),
+            subscribed_markets: DashSet::new(),
         }
     }
 
@@ -65,9 +69,21 @@ impl SubscriptionManager {
     ) -> Result<impl Stream<Item = Result<WsMessage>>> {
         self.interest.add(MessageInterest::MARKET);
 
-        // Send subscription request
-        let request = SubscriptionRequest::market(asset_ids.clone());
-        self.connection.send(&request)?;
+        // Determine which assets are not yet subscribed
+        let new_assets: Vec<String> = asset_ids
+            .iter()
+            .filter(|id| self.subscribed_assets.insert((*id).clone()))
+            .cloned()
+            .collect();
+
+        // Only send subscription request for new assets
+        if new_assets.is_empty() {
+            debug!("All requested assets already subscribed, multiplexing");
+        } else {
+            debug!(count = new_assets.len(), "Subscribing to new market assets");
+            let request = SubscriptionRequest::market(new_assets);
+            self.connection.send(&request)?;
+        }
 
         // Register subscription
         let sub_id = format!("market:{}", asset_ids.join(","));
@@ -128,17 +144,37 @@ impl SubscriptionManager {
     ) -> Result<impl Stream<Item = Result<WsMessage>>> {
         self.interest.add(MessageInterest::USER);
 
-        // Send authenticated subscription request
-        let request = SubscriptionRequest::user(markets, auth);
-        self.connection.send(&request)?;
+        // Determine which markets are not yet subscribed
+        let new_markets: Vec<String> = if markets.is_empty() {
+            markets.clone()
+        } else {
+            markets
+                .iter()
+                .filter(|m| self.subscribed_markets.insert((*m).clone()))
+                .cloned()
+                .collect()
+        };
+
+        // Only send subscription request for new markets (or if subscribing to all)
+        if !markets.is_empty() && new_markets.is_empty() {
+            debug!("All requested markets already subscribed, multiplexing");
+        } else {
+            debug!(
+                count = new_markets.len(),
+                ?new_markets,
+                "Subscribing to user channel"
+            );
+            let request = SubscriptionRequest::user(new_markets, auth);
+            self.connection.send(&request)?;
+        }
 
         // Register subscription
-        let sub_id = "user:authenticated".to_owned();
+        let sub_id = format!("user:{}", markets.join(","));
         self.active_subs.insert(
             sub_id,
             SubscriptionInfo {
                 channel: ChannelType::User,
-                asset_ids: vec![],
+                asset_ids: markets,
                 created_at: Instant::now(),
             },
         );
