@@ -3,6 +3,7 @@
     reason = "Public WebSocket types intentionally include the module name for clarity"
 )]
 
+use std::collections::{HashMap, hash_map::Entry};
 use std::sync::Arc;
 
 use alloy::primitives::Address;
@@ -16,7 +17,7 @@ use super::connection::{ConnectionManager, ConnectionState};
 use super::messages::{
     AuthPayload, BookUpdate, MidpointUpdate, OrderMessage, PriceChange, TradeMessage, WsMessage,
 };
-use super::subscription::SubscriptionManager;
+use super::subscription::{ChannelType, SubscriptionManager};
 use crate::Result;
 use crate::auth::{Credentials, Kind as AuthKind, Normal};
 use crate::clob::state::{Authenticated, State, Unauthenticated};
@@ -30,22 +31,17 @@ use crate::error::{Error, Synchronization};
 ///
 /// # Examples
 ///
-/// ```no_run
-/// use polymarket_client_sdk::ws::{WebSocketClient, WebSocketConfig};
+/// ```rust, no_run
+/// use polymarket_client_sdk::ws::WebSocketClient;
 /// use futures::StreamExt;
 ///
 /// #[tokio::main]
 /// async fn main() -> anyhow::Result<()> {
 ///     // Create unauthenticated client
-///     let client = WebSocketClient::new(
-///         "wss://ws-subscriptions-clob.polymarket.com/ws/market",
-///         WebSocketConfig::default()
-///     )?;
+///     let client = WebSocketClient::default();
 ///
-///     // Subscribe to orderbook updates
-///     let mut stream = client
-///         .subscribe_orderbook(vec!["asset123".to_owned()])
-///         .await?;
+///     let stream = client.subscribe_orderbook(vec!["asset_id".to_owned()])?;
+///     let mut stream = Box::pin(stream);
 ///
 ///     while let Some(book) = stream.next().await {
 ///         println!("Orderbook: {:?}", book?);
@@ -58,30 +54,45 @@ pub struct WebSocketClient<S: State = Unauthenticated> {
     inner: Arc<WsClientInner<S>>,
 }
 
+impl Default for WebSocketClient<Unauthenticated> {
+    fn default() -> Self {
+        Self::new(
+            "wss://ws-subscriptions-clob.polymarket.com",
+            WebSocketConfig::default(),
+        )
+        .expect("WebSocket client with default endpoint should succeed")
+    }
+}
+
 struct WsClientInner<S: State> {
     /// Current state of the client (authenticated or unauthenticated)
     state: S,
-    /// Configuration for the WebSocket connection
+    /// Configuration for the WebSocket connections
     config: WebSocketConfig,
-    /// Connection manager handling the WebSocket connection
-    connection: Arc<ConnectionManager>,
-    /// Subscription manager for handling active subscriptions
-    subscriptions: Arc<SubscriptionManager>,
+    /// Base endpoint without channel suffix (e.g. `wss://...`)
+    base_endpoint: String,
+    /// Resources for each WebSocket channel
+    channels: HashMap<ChannelType, ChannelHandles>,
 }
 
 impl WebSocketClient<Unauthenticated> {
     /// Create a new unauthenticated WebSocket client.
+    ///
+    /// The `endpoint` should be the base WebSocket URL (e.g. `wss://...polymarket.com`);
+    /// channel paths (`/ws/market` or `/ws/user`) are appended automatically.
     pub fn new(endpoint: &str, config: WebSocketConfig) -> Result<Self> {
-        let connection = ConnectionManager::new(endpoint.to_owned(), config.clone())?;
-        let connection = Arc::new(connection);
-        let subscriptions = SubscriptionManager::new(Arc::clone(&connection));
+        let normalized = normalize_base_endpoint(endpoint);
+        let market_handles =
+            ChannelHandles::connect(channel_endpoint(&normalized, ChannelType::Market), &config)?;
+        let mut channels = HashMap::new();
+        channels.insert(ChannelType::Market, market_handles);
 
         Ok(Self {
             inner: Arc::new(WsClientInner {
                 state: Unauthenticated,
                 config,
-                connection,
-                subscriptions: Arc::new(subscriptions),
+                base_endpoint: normalized,
+                channels,
             }),
         })
     }
@@ -95,6 +106,20 @@ impl WebSocketClient<Unauthenticated> {
         address: Address,
     ) -> Result<WebSocketClient<Authenticated<Normal>>> {
         let inner = Arc::try_unwrap(self.inner).map_err(|_e| Synchronization)?;
+        let WsClientInner {
+            config,
+            base_endpoint,
+            mut channels,
+            ..
+        } = inner;
+
+        if let Entry::Vacant(slot) = channels.entry(ChannelType::User) {
+            let handles = ChannelHandles::connect(
+                channel_endpoint(&base_endpoint, ChannelType::User),
+                &config,
+            )?;
+            slot.insert(handles);
+        }
 
         Ok(WebSocketClient {
             inner: Arc::new(WsClientInner {
@@ -103,9 +128,9 @@ impl WebSocketClient<Unauthenticated> {
                     credentials,
                     kind: Normal,
                 },
-                config: inner.config,
-                connection: inner.connection,
-                subscriptions: inner.subscriptions,
+                config,
+                base_endpoint,
+                channels,
             }),
         })
     }
@@ -118,7 +143,10 @@ impl<S: State> WebSocketClient<S> {
         &self,
         asset_ids: Vec<String>,
     ) -> Result<impl Stream<Item = Result<BookUpdate>>> {
-        let stream = self.inner.subscriptions.subscribe_market(asset_ids)?;
+        let stream = self
+            .market_handles()?
+            .subscriptions
+            .subscribe_market(asset_ids)?;
 
         Ok(stream.filter_map(|msg_result| async move {
             match msg_result {
@@ -134,7 +162,10 @@ impl<S: State> WebSocketClient<S> {
         &self,
         asset_ids: Vec<String>,
     ) -> Result<impl Stream<Item = Result<PriceChange>>> {
-        let stream = self.inner.subscriptions.subscribe_market(asset_ids)?;
+        let stream = self
+            .market_handles()?
+            .subscriptions
+            .subscribe_market(asset_ids)?;
 
         Ok(stream.filter_map(|msg_result| async move {
             match msg_result {
@@ -185,13 +216,27 @@ impl<S: State> WebSocketClient<S> {
 
     /// Get the current connection state.
     pub async fn connection_state(&self) -> ConnectionState {
-        self.inner.connection.state().await
+        if let Some(handles) = self.inner.channel(ChannelType::Market) {
+            handles.connection.state().await
+        } else {
+            ConnectionState::Disconnected
+        }
     }
 
     /// Get the number of active subscriptions.
     #[must_use]
     pub fn subscription_count(&self) -> usize {
-        self.inner.subscriptions.subscription_count()
+        self.inner
+            .channels
+            .values()
+            .map(|handles| handles.subscriptions.subscription_count())
+            .sum()
+    }
+
+    fn market_handles(&self) -> Result<&ChannelHandles> {
+        self.inner
+            .channel(ChannelType::Market)
+            .ok_or_else(|| Error::validation("Market channel unavailable; recreate client"))
     }
 }
 
@@ -208,7 +253,11 @@ impl<K: AuthKind> WebSocketClient<Authenticated<K>> {
             passphrase: self.inner.state.credentials.passphrase.reveal().clone(),
         };
 
-        let stream = self.inner.subscriptions.subscribe_user(markets, auth)?;
+        let handles = self
+            .inner
+            .channel(ChannelType::User)
+            .ok_or_else(|| Error::validation("User channel unavailable; authenticate first"))?;
+        let stream = handles.subscriptions.subscribe_user(markets, auth)?;
 
         Ok(stream.filter_map(|msg_result| async move {
             match msg_result {
@@ -230,7 +279,11 @@ impl<K: AuthKind> WebSocketClient<Authenticated<K>> {
             passphrase: self.inner.state.credentials.passphrase.reveal().clone(),
         };
 
-        let stream = self.inner.subscriptions.subscribe_user(markets, auth)?;
+        let handles = self
+            .inner
+            .channel(ChannelType::User)
+            .ok_or_else(|| Error::validation("User channel unavailable; authenticate first"))?;
+        let stream = handles.subscriptions.subscribe_user(markets, auth)?;
 
         Ok(stream.filter_map(|msg_result| async move {
             match msg_result {
@@ -244,13 +297,20 @@ impl<K: AuthKind> WebSocketClient<Authenticated<K>> {
     /// Deauthenticate and return to unauthenticated state.
     pub fn deauthenticate(self) -> Result<WebSocketClient<Unauthenticated>> {
         let inner = Arc::try_unwrap(self.inner).map_err(|_e| Synchronization)?;
+        let WsClientInner {
+            config,
+            base_endpoint,
+            mut channels,
+            ..
+        } = inner;
+        channels.remove(&ChannelType::User);
 
         Ok(WebSocketClient {
             inner: Arc::new(WsClientInner {
                 state: Unauthenticated,
-                config: inner.config,
-                connection: inner.connection,
-                subscriptions: inner.subscriptions,
+                config,
+                base_endpoint,
+                channels,
             }),
         })
     }
@@ -262,4 +322,53 @@ impl<S: State> Clone for WebSocketClient<S> {
             inner: Arc::clone(&self.inner),
         }
     }
+}
+
+impl<S: State> WsClientInner<S> {
+    fn channel(&self, kind: ChannelType) -> Option<&ChannelHandles> {
+        self.channels.get(&kind)
+    }
+}
+
+/// Handles for a specific WebSocket channel.
+#[derive(Clone)]
+struct ChannelHandles {
+    /// Manages the WebSocket connection.
+    connection: Arc<ConnectionManager>,
+    /// Manages active subscriptions on this channel.
+    subscriptions: Arc<SubscriptionManager>,
+}
+
+impl ChannelHandles {
+    fn connect(endpoint: String, config: &WebSocketConfig) -> Result<Self> {
+        let connection = Arc::new(ConnectionManager::new(endpoint, config.clone())?);
+        let subscriptions = Arc::new(SubscriptionManager::new(Arc::clone(&connection)));
+
+        Ok(Self {
+            connection,
+            subscriptions,
+        })
+    }
+}
+
+fn normalize_base_endpoint(endpoint: &str) -> String {
+    let trimmed = endpoint.trim_end_matches('/');
+    if let Some(stripped) = trimmed.strip_suffix("/ws/market") {
+        stripped.to_owned()
+    } else if let Some(stripped) = trimmed.strip_suffix("/ws/user") {
+        stripped.to_owned()
+    } else if let Some(stripped) = trimmed.strip_suffix("/ws") {
+        stripped.to_owned()
+    } else {
+        trimmed.to_owned()
+    }
+}
+
+fn channel_endpoint(base: &str, channel: ChannelType) -> String {
+    let trimmed = base.trim_end_matches('/');
+    let segment = match channel {
+        ChannelType::Market => "market",
+        ChannelType::User => "user",
+    };
+    format!("{trimmed}/ws/{segment}")
 }

@@ -3,15 +3,12 @@
 //! Example of subscribing to real-time orderbook updates via WebSocket.
 
 use futures::StreamExt as _;
-use polymarket_client_sdk::ws::{WebSocketClient, WebSocketConfig};
+use polymarket_client_sdk::ws::WebSocketClient;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     // Create WebSocket client for CLOB endpoint
-    let client = WebSocketClient::new(
-        "wss://ws-subscriptions-clob.polymarket.com/ws/market",
-        WebSocketConfig::default(),
-    )?;
+    let client = WebSocketClient::default();
 
     println!("Connected to CLOB WebSocket API");
 
