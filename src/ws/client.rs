@@ -7,7 +7,7 @@ use std::collections::{HashMap, hash_map::Entry};
 use std::sync::Arc;
 
 use alloy::primitives::Address;
-use async_stream::stream;
+use async_stream::try_stream;
 use futures::Stream;
 use futures::StreamExt as _;
 use rust_decimal::Decimal;
@@ -190,33 +190,19 @@ impl<S: State> WebSocketClient<S> {
     ) -> Result<impl Stream<Item = Result<MidpointUpdate>>> {
         let stream = self.subscribe_orderbook(asset_ids)?;
 
-        Ok(stream! {
+        Ok(try_stream! {
             for await book_result in stream {
-                match book_result {
-                    Ok(book) => {
-                        // Calculate midpoint from best bid/ask
-                        let best_bid = book.bids.first();
-                        let best_ask = book.asks.first();
+                let book = book_result?;
 
-                        match (best_bid, best_ask) {
-                            (Some(bid), Some(ask)) => {
-                                let midpoint = (bid.price + ask.price) / Decimal::TWO;
-                                yield Ok(MidpointUpdate {
-                                    asset_id: book.asset_id,
-                                    market: book.market,
-                                    midpoint,
-                                    timestamp: book.timestamp,
-                                });
-                            }
-                            _ => {
-                                // No bid or ask available; skip midpoint
-                                continue;
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        yield Err(e);
-                    }
+                // Calculate midpoint from best bid/ask
+                if let (Some(bid), Some(ask)) = (book.bids.first(), book.asks.first()) {
+                    let midpoint = (bid.price + ask.price) / Decimal::TWO;
+                    yield MidpointUpdate {
+                        asset_id: book.asset_id,
+                        market: book.market,
+                        midpoint,
+                        timestamp: book.timestamp,
+                    };
                 }
             }
         })

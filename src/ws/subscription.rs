@@ -7,7 +7,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, RwLock};
 use std::time::Instant;
 
-use async_stream::stream;
+use async_stream::try_stream;
 use dashmap::{DashMap, DashSet};
 use futures::Stream;
 use tokio::sync::broadcast::error::RecvError;
@@ -226,33 +226,29 @@ impl SubscriptionManager {
         let mut rx = self.connection.subscribe();
         let asset_ids_set: HashSet<String> = asset_ids.into_iter().collect();
 
-        Ok(stream! {
+        Ok(try_stream! {
             loop {
                 match rx.recv().await {
                     Ok(res) => {
-                        match res.as_ref() {
-                            Ok(msg) => {
-                                // Filter messages by asset_id
-                                let should_yield = match msg {
-                                    WsMessage::Book(book) => asset_ids_set.contains(&book.asset_id),
-                                    WsMessage::PriceChange(price) => asset_ids_set.contains(&price.asset_id),
-                                    WsMessage::LastTradePrice(ltp) => asset_ids_set.contains(&ltp.asset_id),
-                                    WsMessage::TickSizeChange(tsc) => asset_ids_set.contains(&tsc.asset_id),
-                                    _ => false,
-                                };
+                        let msg = res.as_ref().as_ref()
+                            .map_err(|e| WsError::InvalidMessage(e.to_string()))?;
 
-                                if should_yield {
-                                    yield Ok(msg.clone());
-                                }
-                            }
-                            Err(e) => {
-                                yield Err(WsError::InvalidMessage(e.to_string()).into());
-                            }
+                        // Filter messages by asset_id
+                        let dominated = match msg {
+                            WsMessage::Book(book) => asset_ids_set.contains(&book.asset_id),
+                            WsMessage::PriceChange(price) => asset_ids_set.contains(&price.asset_id),
+                            WsMessage::LastTradePrice(ltp) => asset_ids_set.contains(&ltp.asset_id),
+                            WsMessage::TickSizeChange(tsc) => asset_ids_set.contains(&tsc.asset_id),
+                            _ => false,
+                        };
+
+                        if dominated {
+                            yield msg.clone();
                         }
                     }
                     Err(RecvError::Lagged(n)) => {
                         warn!("Subscription lagged, missed {n} messages");
-                        yield Err(WsError::Lagged { count: n }.into());
+                        Err(WsError::Lagged { count: n })?;
                     }
                     Err(RecvError::Closed) => {
                         break;
@@ -312,25 +308,21 @@ impl SubscriptionManager {
         // Create stream for user messages
         let mut rx = self.connection.subscribe();
 
-        Ok(stream! {
+        Ok(try_stream! {
             loop {
                 match rx.recv().await {
                     Ok(res) => {
-                        match res.as_ref() {
-                            Ok(msg) => {
-                                // Only yield user messages
-                                if msg.is_user() {
-                                    yield Ok(msg.clone());
-                                }
-                            }
-                            Err(e) => {
-                                yield Err(WsError::InvalidMessage(e.to_string()).into());
-                            }
+                        let msg = res.as_ref().as_ref()
+                            .map_err(|e| WsError::InvalidMessage(e.to_string()))?;
+
+                        // Only yield user messages
+                        if msg.is_user() {
+                            yield msg.clone();
                         }
                     }
                     Err(RecvError::Lagged(n)) => {
                         warn!("Subscription lagged, missed {n} messages");
-                        yield Err(WsError::Lagged { count: n }.into());
+                        Err(WsError::Lagged { count: n })?;
                     }
                     Err(RecvError::Closed) => {
                         break;
