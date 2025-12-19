@@ -1,6 +1,5 @@
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
-use serde_json::{self, Value};
 use serde_with::{DisplayFromStr, serde_as};
 
 use super::interest::MessageInterest;
@@ -14,7 +13,7 @@ use crate::{
 /// This is a dedicated struct for WebSocket authentication that intentionally
 /// serializes credential secrets. It is separate from [`Credentials`] to prevent
 /// accidental serialization of secrets in other contexts (logging, errors, etc.).
-#[derive(Debug, Clone, Serialize)]
+#[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AuthPayload {
     api_key: String,
@@ -22,12 +21,8 @@ pub struct AuthPayload {
     passphrase: String,
 }
 
-impl AuthPayload {
-    /// Create an auth payload from credentials.
-    ///
-    /// This explicitly extracts secrets for WebSocket authentication.
-    #[must_use]
-    pub fn from_credentials(credentials: &Credentials) -> Self {
+impl From<&Credentials> for AuthPayload {
+    fn from(credentials: &Credentials) -> Self {
         Self {
             api_key: credentials.key().to_string(),
             secret: credentials.secret().to_owned(),
@@ -137,60 +132,148 @@ pub struct PriceChange {
     pub best_ask: Option<Decimal>,
 }
 
-/// Raw batch payload sent for price change events.
+/// Unified wire format for `price_change` events.
+///
+/// The server sends either a single price change or a batch. This struct captures both shapes.
 #[serde_as]
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub(crate) struct PriceChangeBatch {
-    /// Market identifier shared across batch entries
-    pub market: String,
-    /// Unix timestamp in milliseconds
+#[derive(Debug, Clone, Deserialize)]
+struct PriceChangeWire {
+    market: String,
     #[serde_as(as = "DisplayFromStr")]
-    pub timestamp: i64,
-    /// Individual price change entries
+    timestamp: i64,
     #[serde(default)]
-    pub price_changes: Vec<PriceChangeBatchEntry>,
+    asset_id: Option<String>,
+    #[serde(default)]
+    price: Option<Decimal>,
+    #[serde(default)]
+    size: Option<Decimal>,
+    #[serde(default)]
+    side: Option<Side>,
+    #[serde(default)]
+    hash: Option<String>,
+    #[serde(default)]
+    best_bid: Option<Decimal>,
+    #[serde(default)]
+    best_ask: Option<Decimal>,
+    #[serde(default)]
+    price_changes: Vec<PriceChangeBatchEntry>,
 }
 
-/// Individual entry inside a price change batch.
-#[serde_as]
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub(crate) struct PriceChangeBatchEntry {
-    /// Asset/token identifier
-    pub asset_id: String,
-    /// New price
-    pub price: Decimal,
-    /// Total size affected at this price level
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub size: Option<Decimal>,
-    /// Side of the book that changed (BUY or SELL)
-    pub side: Side,
-    /// Hash for this entry (if present)
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub hash: Option<String>,
-    /// Best bid price after the change
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub best_bid: Option<Decimal>,
-    /// Best ask price after the change
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub best_ask: Option<Decimal>,
+#[derive(Debug, Clone, Deserialize)]
+struct PriceChangeBatchEntry {
+    asset_id: String,
+    price: Decimal,
+    #[serde(default)]
+    size: Option<Decimal>,
+    side: Side,
+    #[serde(default)]
+    hash: Option<String>,
+    #[serde(default)]
+    best_bid: Option<Decimal>,
+    #[serde(default)]
+    best_ask: Option<Decimal>,
 }
 
-impl PriceChangeBatch {
+impl PriceChangeWire {
     fn into_price_changes(self) -> Vec<PriceChange> {
-        self.price_changes
-            .into_iter()
-            .map(|entry| PriceChange {
-                asset_id: entry.asset_id,
-                market: self.market.clone(),
-                price: entry.price,
-                size: entry.size,
-                side: entry.side,
+        if !self.price_changes.is_empty() {
+            // Batch mode: expand entries
+            self.price_changes
+                .into_iter()
+                .map(|entry| PriceChange {
+                    asset_id: entry.asset_id,
+                    market: self.market.clone(),
+                    price: entry.price,
+                    size: entry.size,
+                    side: entry.side,
+                    timestamp: self.timestamp,
+                    hash: entry.hash,
+                    best_bid: entry.best_bid,
+                    best_ask: entry.best_ask,
+                })
+                .collect()
+        } else if let (Some(asset_id), Some(price), Some(side)) =
+            (self.asset_id, self.price, self.side)
+        {
+            // Single mode
+            vec![PriceChange {
+                asset_id,
+                market: self.market,
+                price,
+                size: self.size,
+                side,
                 timestamp: self.timestamp,
-                hash: entry.hash,
-                best_bid: entry.best_bid,
-                best_ask: entry.best_ask,
-            })
-            .collect()
+                hash: self.hash,
+                best_bid: self.best_bid,
+                best_ask: self.best_ask,
+            }]
+        } else {
+            Vec::new()
+        }
+    }
+}
+
+/// Internal message type.
+#[derive(Debug, Deserialize)]
+#[serde(tag = "event_type")]
+enum RawWsMessage {
+    #[serde(rename = "book")]
+    Book(BookUpdate),
+    #[serde(rename = "price_change")]
+    PriceChange(PriceChangeWire),
+    #[serde(rename = "tick_size_change")]
+    TickSizeChange(TickSizeChange),
+    #[serde(rename = "last_trade_price")]
+    LastTradePrice(LastTradePrice),
+    #[serde(rename = "trade")]
+    Trade(TradeMessage),
+    #[serde(rename = "order")]
+    Order(OrderMessage),
+}
+
+/// The server may send a single message or an array of messages.
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum RawWsMessageEnvelope {
+    Single(Box<RawWsMessage>),
+    Batch(Vec<RawWsMessage>),
+}
+
+impl RawWsMessageEnvelope {
+    fn into_vec(self) -> Vec<RawWsMessage> {
+        match self {
+            Self::Single(msg) => vec![*msg],
+            Self::Batch(msgs) => msgs,
+        }
+    }
+}
+
+impl RawWsMessage {
+    /// Converts to public [`WsMessage`], skipping types not in `interest`.
+    fn into_messages(self, interest: MessageInterest) -> Vec<WsMessage> {
+        match self {
+            Self::Book(book) if interest.contains(MessageInterest::BOOK) => {
+                vec![WsMessage::Book(book)]
+            }
+            Self::PriceChange(wire) if interest.contains(MessageInterest::PRICE_CHANGE) => wire
+                .into_price_changes()
+                .into_iter()
+                .map(WsMessage::PriceChange)
+                .collect(),
+            Self::TickSizeChange(tsc) if interest.contains(MessageInterest::TICK_SIZE) => {
+                vec![WsMessage::TickSizeChange(tsc)]
+            }
+            Self::LastTradePrice(ltp) if interest.contains(MessageInterest::LAST_TRADE_PRICE) => {
+                vec![WsMessage::LastTradePrice(ltp)]
+            }
+            Self::Trade(trade) if interest.contains(MessageInterest::TRADE) => {
+                vec![WsMessage::Trade(trade)]
+            }
+            Self::Order(order) if interest.contains(MessageInterest::ORDER) => {
+                vec![WsMessage::Order(order)]
+            }
+            _ => Vec::new(),
+        }
     }
 }
 
@@ -374,7 +457,7 @@ pub enum OrderStatus {
 
 /// Subscription request message sent to the WebSocket server.
 #[non_exhaustive]
-#[derive(Debug, Clone, Serialize)]
+#[derive(Clone, Serialize)]
 pub struct SubscriptionRequest {
     /// Subscription type ("market" or "user")
     pub r#type: String,
@@ -389,6 +472,25 @@ pub struct SubscriptionRequest {
     /// Authentication credentials
     #[serde(skip_serializing_if = "Option::is_none")]
     pub auth: Option<AuthPayload>,
+}
+
+impl std::fmt::Debug for SubscriptionRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SubscriptionRequest")
+            .field("type", &self.r#type)
+            .field("markets", &self.markets)
+            .field("asset_ids", &self.asset_ids)
+            .field("initial_dump", &self.initial_dump)
+            .field(
+                "auth",
+                if self.auth.is_some() {
+                    &"Some(AuthPayload { ... })"
+                } else {
+                    &"None"
+                },
+            )
+            .finish()
+    }
 }
 
 impl SubscriptionRequest {
@@ -435,8 +537,7 @@ pub struct MidpointUpdate {
 
 /// Parse a raw WebSocket message string into one or more [`WsMessage`] instances.
 ///
-/// JSON parsing always occurs, but typed deserialization into specific message structs
-/// is skipped for messages that don't match the interest, reducing overhead.
+/// Messages not matching the interest filter are skipped.
 pub(crate) fn parse_ws_text(
     text: &str,
     interest: MessageInterest,
@@ -447,77 +548,12 @@ pub(crate) fn parse_ws_text(
         return Ok(Vec::new());
     }
 
-    if trimmed.starts_with('[') {
-        let values: Vec<Value> = serde_json::from_str(trimmed)?;
-        let mut messages = Vec::new();
-        for value in values {
-            messages.extend(parse_ws_value(value, interest)?);
-        }
-        Ok(messages)
-    } else {
-        parse_ws_value(serde_json::from_str(trimmed)?, interest)
-    }
-}
-
-/// Parse a single [`Value`] into [`Vec<WsMessage>`].
-///
-/// Routes deserialization based on `event_type` field for efficiency,
-/// avoiding the overhead of trying to deserialize into all possible message types.
-fn parse_ws_value(value: Value, interest: MessageInterest) -> serde_json::Result<Vec<WsMessage>> {
-    let event_type = value.get("event_type").and_then(Value::as_str);
-
-    match event_type {
-        Some("book") => {
-            if !interest.contains(MessageInterest::BOOK) {
-                return Ok(Vec::new());
-            }
-            serde_json::from_value(value).map(|b| vec![WsMessage::Book(b)])
-        }
-        Some("price_change") => {
-            if !interest.contains(MessageInterest::PRICE_CHANGE) {
-                return Ok(Vec::new());
-            }
-            // Check if it's a batch or single price change
-            if value.get("price_changes").is_some() {
-                let batch: PriceChangeBatch = serde_json::from_value(value)?;
-                Ok(batch
-                    .into_price_changes()
-                    .into_iter()
-                    .map(WsMessage::PriceChange)
-                    .collect())
-            } else {
-                serde_json::from_value(value).map(|p| vec![WsMessage::PriceChange(p)])
-            }
-        }
-        Some("tick_size_change") => {
-            if !interest.contains(MessageInterest::TICK_SIZE) {
-                return Ok(Vec::new());
-            }
-            serde_json::from_value(value).map(|t| vec![WsMessage::TickSizeChange(t)])
-        }
-        Some("last_trade_price") => {
-            if !interest.contains(MessageInterest::LAST_TRADE_PRICE) {
-                return Ok(Vec::new());
-            }
-            serde_json::from_value(value).map(|l| vec![WsMessage::LastTradePrice(l)])
-        }
-        Some("trade") => {
-            if !interest.contains(MessageInterest::TRADE) {
-                return Ok(Vec::new());
-            }
-            serde_json::from_value(value).map(|t| vec![WsMessage::Trade(t)])
-        }
-        Some("order") => {
-            if !interest.contains(MessageInterest::ORDER) {
-                return Ok(Vec::new());
-            }
-            serde_json::from_value(value).map(|o| vec![WsMessage::Order(o)])
-        }
-        _ => {
-            // Untagged fallback deserialization for unknown event types
-            serde_json::from_value(value).map(|msg| vec![msg])
-        }
-    }
+    let raw_messages: RawWsMessageEnvelope = serde_json::from_str(trimmed)?;
+    Ok(raw_messages
+        .into_vec()
+        .into_iter()
+        .flat_map(|raw| raw.into_messages(interest))
+        .collect())
 }
 
 #[cfg(test)]
@@ -637,10 +673,8 @@ mod tests {
             "test-secret".to_owned(),
             "test-pass".to_owned(),
         );
-        let request = SubscriptionRequest::user(
-            vec!["market1".to_owned()],
-            AuthPayload::from_credentials(&credentials),
-        );
+        let request =
+            SubscriptionRequest::user(vec!["market1".to_owned()], AuthPayload::from(&credentials));
 
         let json = serde_json::to_string(&request).unwrap();
         assert!(json.contains("\"type\":\"user\""));

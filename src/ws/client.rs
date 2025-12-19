@@ -240,7 +240,7 @@ impl<K: AuthKind> WebSocketClient<Authenticated<K>> {
         &self,
         markets: Vec<String>,
     ) -> Result<impl Stream<Item = Result<WsMessage>>> {
-        let auth = AuthPayload::from_credentials(&self.inner.state.credentials);
+        let auth = AuthPayload::from(&self.inner.state.credentials);
 
         let handles = self
             .inner
