@@ -236,7 +236,12 @@ impl SubscriptionManager {
                         // Filter messages by asset_id
                         let should_yield = match &msg {
                             WsMessage::Book(book) => asset_ids_set.contains(&book.asset_id),
-                            WsMessage::PriceChange(price) => asset_ids_set.contains(&price.asset_id),
+                            WsMessage::PriceChange(price) => {
+                                price
+                                    .price_changes
+                                    .iter()
+                                    .any(|pc| asset_ids_set.contains(&pc.asset_id))
+                            },
                             WsMessage::LastTradePrice(ltp) => asset_ids_set.contains(&ltp.asset_id),
                             WsMessage::TickSizeChange(tsc) => asset_ids_set.contains(&tsc.asset_id),
                             _ => false,

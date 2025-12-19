@@ -1,8 +1,13 @@
+use std::fmt;
+
 use rust_decimal::Decimal;
-use serde::{Deserialize, Serialize};
+use serde::de::{IgnoredAny, MapAccess, Visitor};
+use serde::{Deserialize, Deserializer as _, Serialize};
+use serde_json::Deserializer;
 use serde_with::{DisplayFromStr, serde_as};
 
 use super::interest::MessageInterest;
+use crate::error::Kind;
 use crate::{
     auth::Credentials,
     types::{Side, TraderSide},
@@ -36,20 +41,26 @@ impl From<&Credentials> for AuthPayload {
 /// All messages received from the WebSocket connection are deserialized into this enum.
 #[non_exhaustive]
 #[derive(Debug, Clone, Deserialize)]
-#[serde(untagged)]
+#[serde(tag = "event_type")]
 pub enum WsMessage {
-    /// User trade execution (authenticated channel)
-    Trade(TradeMessage),
-    /// User order update (authenticated channel)
-    Order(OrderMessage),
+    /// Full or incremental orderbook update
+    #[serde(rename = "book")]
+    Book(BookUpdate),
     /// Price change notification
+    #[serde(rename = "price_change")]
     PriceChange(PriceChange),
     /// Tick size change notification
+    #[serde(rename = "tick_size_change")]
     TickSizeChange(TickSizeChange),
     /// Last trade price update
+    #[serde(rename = "last_trade_price")]
     LastTradePrice(LastTradePrice),
-    /// Full or incremental orderbook update
-    Book(BookUpdate),
+    /// User trade execution (authenticated channel)
+    #[serde(rename = "trade")]
+    Trade(TradeMessage),
+    /// User order update (authenticated channel)
+    #[serde(rename = "order")]
+    Order(OrderMessage),
 }
 
 impl WsMessage {
@@ -102,179 +113,42 @@ pub struct OrderBookLevel {
     pub size: Decimal,
 }
 
-/// Price change event triggered by new orders or cancellations.
-#[non_exhaustive]
-#[serde_as]
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct PriceChange {
-    /// Asset/token identifier
-    pub asset_id: String,
-    /// Market identifier
-    pub market: String,
-    /// New price
-    pub price: Decimal,
-    /// Total size affected by this price change (if provided)
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub size: Option<Decimal>,
-    /// Side of the price change (BUY or SELL)
-    pub side: Side,
-    /// Unix timestamp in milliseconds
-    #[serde_as(as = "DisplayFromStr")]
-    pub timestamp: i64,
-    /// Hash for validation (if present)
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub hash: Option<String>,
-    /// Best bid price after this change
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub best_bid: Option<Decimal>,
-    /// Best ask price after this change
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub best_ask: Option<Decimal>,
-}
-
 /// Unified wire format for `price_change` events.
 ///
 /// The server sends either a single price change or a batch. This struct captures both shapes.
+#[non_exhaustive]
 #[serde_as]
 #[derive(Debug, Clone, Deserialize)]
-struct PriceChangeWire {
-    market: String,
+pub struct PriceChange {
+    /// Market identifier
+    pub market: String,
     #[serde_as(as = "DisplayFromStr")]
-    timestamp: i64,
+    pub timestamp: i64,
     #[serde(default)]
-    asset_id: Option<String>,
-    #[serde(default)]
-    price: Option<Decimal>,
-    #[serde(default)]
-    size: Option<Decimal>,
-    #[serde(default)]
-    side: Option<Side>,
-    #[serde(default)]
-    hash: Option<String>,
-    #[serde(default)]
-    best_bid: Option<Decimal>,
-    #[serde(default)]
-    best_ask: Option<Decimal>,
-    #[serde(default)]
-    price_changes: Vec<PriceChangeBatchEntry>,
+    pub price_changes: Vec<PriceChangeBatchEntry>,
 }
 
+#[non_exhaustive]
 #[derive(Debug, Clone, Deserialize)]
-struct PriceChangeBatchEntry {
-    asset_id: String,
-    price: Decimal,
+pub struct PriceChangeBatchEntry {
+    /// Asset/token identifier
+    pub asset_id: String,
+    /// New price
+    pub price: Decimal,
+    /// Total size affected by this price change (if provided)
     #[serde(default)]
-    size: Option<Decimal>,
-    side: Side,
+    pub size: Option<Decimal>,
+    /// Side of the price change (BUY or SELL)
+    pub side: Side,
+    /// Hash for validation (if present)
     #[serde(default)]
-    hash: Option<String>,
+    pub hash: Option<String>,
+    /// Best bid price after this change
     #[serde(default)]
-    best_bid: Option<Decimal>,
+    pub best_bid: Option<Decimal>,
+    /// Best ask price after this change
     #[serde(default)]
-    best_ask: Option<Decimal>,
-}
-
-impl PriceChangeWire {
-    fn into_price_changes(self) -> Vec<PriceChange> {
-        if !self.price_changes.is_empty() {
-            // Batch mode: expand entries
-            self.price_changes
-                .into_iter()
-                .map(|entry| PriceChange {
-                    asset_id: entry.asset_id,
-                    market: self.market.clone(),
-                    price: entry.price,
-                    size: entry.size,
-                    side: entry.side,
-                    timestamp: self.timestamp,
-                    hash: entry.hash,
-                    best_bid: entry.best_bid,
-                    best_ask: entry.best_ask,
-                })
-                .collect()
-        } else if let (Some(asset_id), Some(price), Some(side)) =
-            (self.asset_id, self.price, self.side)
-        {
-            // Single mode
-            vec![PriceChange {
-                asset_id,
-                market: self.market,
-                price,
-                size: self.size,
-                side,
-                timestamp: self.timestamp,
-                hash: self.hash,
-                best_bid: self.best_bid,
-                best_ask: self.best_ask,
-            }]
-        } else {
-            Vec::new()
-        }
-    }
-}
-
-/// Internal message type.
-#[derive(Debug, Deserialize)]
-#[serde(tag = "event_type")]
-enum RawWsMessage {
-    #[serde(rename = "book")]
-    Book(BookUpdate),
-    #[serde(rename = "price_change")]
-    PriceChange(PriceChangeWire),
-    #[serde(rename = "tick_size_change")]
-    TickSizeChange(TickSizeChange),
-    #[serde(rename = "last_trade_price")]
-    LastTradePrice(LastTradePrice),
-    #[serde(rename = "trade")]
-    Trade(TradeMessage),
-    #[serde(rename = "order")]
-    Order(OrderMessage),
-}
-
-/// The server may send a single message or an array of messages.
-#[derive(Debug, Deserialize)]
-#[serde(untagged)]
-enum RawWsMessageEnvelope {
-    Single(Box<RawWsMessage>),
-    Batch(Vec<RawWsMessage>),
-}
-
-impl RawWsMessageEnvelope {
-    fn into_vec(self) -> Vec<RawWsMessage> {
-        match self {
-            Self::Single(msg) => vec![*msg],
-            Self::Batch(msgs) => msgs,
-        }
-    }
-}
-
-impl RawWsMessage {
-    /// Converts to public [`WsMessage`], skipping types not in `interest`.
-    fn into_messages(self, interest: MessageInterest) -> Vec<WsMessage> {
-        match self {
-            Self::Book(book) if interest.contains(MessageInterest::BOOK) => {
-                vec![WsMessage::Book(book)]
-            }
-            Self::PriceChange(wire) if interest.contains(MessageInterest::PRICE_CHANGE) => wire
-                .into_price_changes()
-                .into_iter()
-                .map(WsMessage::PriceChange)
-                .collect(),
-            Self::TickSizeChange(tsc) if interest.contains(MessageInterest::TICK_SIZE) => {
-                vec![WsMessage::TickSizeChange(tsc)]
-            }
-            Self::LastTradePrice(ltp) if interest.contains(MessageInterest::LAST_TRADE_PRICE) => {
-                vec![WsMessage::LastTradePrice(ltp)]
-            }
-            Self::Trade(trade) if interest.contains(MessageInterest::TRADE) => {
-                vec![WsMessage::Trade(trade)]
-            }
-            Self::Order(order) if interest.contains(MessageInterest::ORDER) => {
-                vec![WsMessage::Order(order)]
-            }
-            _ => Vec::new(),
-        }
-    }
+    pub best_ask: Option<Decimal>,
 }
 
 /// Tick size change event (triggered when price crosses thresholds).
@@ -535,29 +409,65 @@ pub struct MidpointUpdate {
     pub timestamp: i64,
 }
 
-/// Parse a raw WebSocket message string into one or more [`WsMessage`] instances.
-///
-/// Messages not matching the interest filter are skipped.
-pub(crate) fn parse_ws_text(
-    text: &str,
-    interest: MessageInterest,
-) -> serde_json::Result<Vec<WsMessage>> {
-    let trimmed = text.trim();
+fn extract_event_type(bytes: &[u8]) -> Result<Option<String>, serde_json::Error> {
+    struct EventTypeOnly;
 
-    if trimmed.is_empty() {
-        return Ok(Vec::new());
+    impl<'de> Visitor<'de> for EventTypeOnly {
+        type Value = Option<String>;
+
+        fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+            formatter.write_str("a JSON object with an event_type field")
+        }
+
+        fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+        where
+            A: MapAccess<'de>,
+        {
+            // Only parse the `event_type` out of the byte slice, ignoring _everything_ else
+            let mut event_type: Option<String> = None;
+            while let Some(key) = map.next_key::<&str>()? {
+                if key == "event_type" {
+                    event_type = Some(map.next_value::<String>()?);
+                } else {
+                    map.next_value::<IgnoredAny>()?;
+                }
+            }
+            Ok(event_type)
+        }
     }
 
-    let raw_messages: RawWsMessageEnvelope = serde_json::from_str(trimmed)?;
-    Ok(raw_messages
-        .into_vec()
-        .into_iter()
-        .flat_map(|raw| raw.into_messages(interest))
-        .collect())
+    let mut de = Deserializer::from_slice(bytes);
+    de.deserialize_any(EventTypeOnly)
+}
+
+/// Deserialize from the byte slice _only_ if there is corresponding `interest` for the "`event_type`"
+/// contained therein. This is done as an optimization technique so that only data that subscribers
+/// care about is deserialized.
+pub fn parse_if_interested(
+    bytes: &[u8],
+    interest: &MessageInterest,
+) -> crate::Result<Option<WsMessage>> {
+    // Attempt to retrieve the `event_type` from the JSON bytes
+    let event_type = extract_event_type(bytes)
+        .map_err(|e| crate::error::Error::with_source(Kind::Internal, Box::new(e)))?;
+
+    // If there is no `event_type`, then skip
+    let Some(event_type) = event_type else {
+        return Ok(None);
+    };
+
+    // If there is an `event_type` and there is no interest in that particular value, then skip
+    if !interest.is_interested_in_event(&event_type) {
+        return Ok(None);
+    }
+
+    Ok(Some(serde_json::from_slice(bytes)?))
 }
 
 #[cfg(test)]
 mod tests {
+    use rust_decimal_macros::dec;
+
     use super::*;
     use crate::types::ApiKey;
 
@@ -587,27 +497,31 @@ mod tests {
     fn parse_price_change_message() {
         let json = r#"{
             "event_type": "price_change",
-            "asset_id": "456",
             "market": "market2",
-            "price": "0.52",
-            "size": "10",
-            "side": "BUY",
-            "timestamp": "1234567890"
+            "timestamp": "1234567890",
+            "price_changes": [{
+                "asset_id": "456",
+                "price": "0.52",
+                "size": "10",
+                "side": "BUY"
+            }]
         }"#;
 
         let msg: WsMessage = serde_json::from_str(json).unwrap();
         match msg {
             WsMessage::PriceChange(price) => {
-                assert_eq!(price.asset_id, "456");
-                assert_eq!(price.side, Side::Buy);
-                assert_eq!(price.size.unwrap(), Decimal::from(10));
+                let changes = &price.price_changes[0];
+
+                assert_eq!(changes.asset_id, "456");
+                assert_eq!(changes.side, Side::Buy);
+                assert_eq!(changes.size.unwrap(), Decimal::TEN);
             }
             _ => panic!("Expected PriceChange message"),
         }
     }
 
     #[test]
-    fn parse_price_change_batch_message() {
+    fn parse_price_change_interest_message() {
         let json = r#"{
             "event_type": "price_change",
             "market": "market3",
@@ -630,29 +544,28 @@ mod tests {
             ]
         }"#;
 
-        let msgs = parse_ws_text(json, MessageInterest::ALL).unwrap();
-        assert_eq!(msgs.len(), 2);
+        let msgs = parse_if_interested(json.as_bytes(), &MessageInterest::ALL)
+            .unwrap()
+            .unwrap();
 
-        match &msgs[0] {
+        match msgs {
             WsMessage::PriceChange(price) => {
-                assert_eq!(price.asset_id, "asset_a");
                 assert_eq!(price.market, "market3");
-                assert_eq!(
-                    price.best_bid.unwrap(),
-                    Decimal::from_str_exact("0.11").unwrap()
-                );
-                assert!(price.size.is_none());
+
+                let changes = &price.price_changes;
+                assert_eq!(changes.len(), 2);
+
+                assert_eq!(changes[0].asset_id, "asset_a");
+                assert_eq!(changes[0].best_bid, Some(dec!(0.11)));
+                assert_eq!(changes[0].price, dec!(0.10));
+                assert!(changes[0].size.is_none());
+
+                assert_eq!(changes[1].asset_id, "asset_b");
+                assert_eq!(changes[1].best_bid, None);
+                assert_eq!(changes[1].size, Some(dec!(5)));
+                assert_eq!(changes[1].price, dec!(0.90));
             }
             _ => panic!("Expected first price change"),
-        }
-
-        match &msgs[1] {
-            WsMessage::PriceChange(price) => {
-                assert_eq!(price.asset_id, "asset_b");
-                assert_eq!(price.size.unwrap(), Decimal::from(5));
-                assert_eq!(price.side, Side::Sell);
-            }
-            _ => panic!("Expected second price change"),
         }
     }
 

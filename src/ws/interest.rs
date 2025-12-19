@@ -67,6 +67,12 @@ impl MessageInterest {
             _ => Self::NONE,
         }
     }
+
+    #[must_use]
+    pub fn is_interested_in_event(&self, event_type: &str) -> bool {
+        let interest = MessageInterest::from_event_type(event_type);
+        !interest.is_empty() && self.contains(interest)
+    }
 }
 
 impl Default for MessageInterest {

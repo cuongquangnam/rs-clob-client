@@ -17,7 +17,7 @@ use tracing::{debug, error, trace, warn};
 use super::config::WebSocketConfig;
 use super::error::WsError;
 use super::interest::InterestTracker;
-use super::types::{SubscriptionRequest, WsMessage, parse_ws_text};
+use super::types::{SubscriptionRequest, WsMessage, parse_if_interested};
 use crate::{
     Result,
     error::{Error, Kind},
@@ -219,13 +219,12 @@ impl ConnectionManager {
                             }
 
                             // Only deserialize message types that have active consumers
-                            match parse_ws_text(&text, interest.get()) {
-                                Ok(messages) => {
-                                    for ws_msg in messages {
-                                        trace!(?ws_msg, "Received WebSocket message");
-                                        _ = broadcast_tx.send(ws_msg);
-                                    }
+                            match parse_if_interested(text.as_bytes(), &interest.get()) {
+                                Ok(Some(message)) => {
+                                    trace!(?message, "Received WebSocket message");
+                                    _ = broadcast_tx.send(message);
                                 }
+                                Ok(None) => {},
                                 Err(e) => {
                                     warn!(%text, error = %e, "Failed to parse WebSocket message");
                                 }

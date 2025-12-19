@@ -297,11 +297,11 @@ mod market_channel {
         let result = timeout(Duration::from_secs(2), stream.next()).await;
         let price = result.unwrap().unwrap().unwrap();
 
-        assert_eq!(price.asset_id, asset_id);
-        assert_eq!(price.price, dec!(0.5));
-        assert_eq!(price.size, Some(dec!(200)));
-        assert_eq!(price.best_bid, Some(dec!(0.5)));
-        assert_eq!(price.best_ask, Some(dec!(1)));
+        assert_eq!(price.price_changes[0].asset_id, asset_id);
+        assert_eq!(price.price_changes[0].price, dec!(0.5));
+        assert_eq!(price.price_changes[0].size, Some(dec!(200)));
+        assert_eq!(price.price_changes[0].best_bid, Some(dec!(0.5)));
+        assert_eq!(price.price_changes[0].best_ask, Some(dec!(1)));
     }
 
     #[tokio::test]
@@ -929,20 +929,18 @@ mod message_parsing {
 
         // Should receive two price changes
         let result1 = timeout(Duration::from_secs(2), stream.next()).await;
-        let price1 = result1.unwrap().unwrap().unwrap();
-        assert_eq!(price1.asset_id, asset_a);
-        assert_eq!(price1.price, dec!(0.5));
-        assert_eq!(price1.size, Some(dec!(200)));
+        let prices = result1.unwrap().unwrap().unwrap();
+        assert_eq!(prices.price_changes[0].asset_id, asset_a);
+        assert_eq!(prices.price_changes[0].price, dec!(0.5));
+        assert_eq!(prices.price_changes[0].size, Some(dec!(200)));
         assert_eq!(
-            price1.hash,
+            prices.price_changes[0].hash,
             Some("56621a121a47ed9333273e21c83b660cff37ae50".to_owned())
         );
 
-        let result2 = timeout(Duration::from_secs(2), stream.next()).await;
-        let price2 = result2.unwrap().unwrap().unwrap();
-        assert_eq!(price2.asset_id, asset_b);
-        assert_eq!(price2.price, dec!(0.75));
-        assert!(price2.size.is_none());
+        assert_eq!(prices.price_changes[1].asset_id, asset_b);
+        assert_eq!(prices.price_changes[1].price, dec!(0.75));
+        assert!(prices.price_changes[1].size.is_none());
     }
 
     #[test]
