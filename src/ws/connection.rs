@@ -12,7 +12,7 @@ use tokio::net::TcpStream;
 use tokio::sync::{RwLock, broadcast, mpsc, watch};
 use tokio::time::{interval, sleep, timeout};
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, connect_async, tungstenite::Message};
-use tracing::{debug, error, warn};
+use tracing::{debug, error, trace, warn};
 
 use super::config::WebSocketConfig;
 use super::error::WsError;
@@ -222,6 +222,7 @@ impl ConnectionManager {
                             match parse_ws_text(&text, interest.get()) {
                                 Ok(messages) => {
                                     for ws_msg in messages {
+                                        trace!(?ws_msg, "Received WebSocket message");
                                         _ = broadcast_tx.send(ws_msg);
                                     }
                                 }

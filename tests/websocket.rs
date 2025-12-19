@@ -22,7 +22,7 @@ struct MockWsServer {
     addr: SocketAddr,
     /// Broadcast messages to ALL connected clients
     message_tx: broadcast::Sender<String>,
-    /// Receive subscription requests from clients
+    /// Receives subscription requests from clients
     subscription_rx: mpsc::UnboundedReceiver<String>,
 }
 
@@ -116,6 +116,9 @@ mod payloads {
 
     pub const ASSET_ID: &str =
         "65818619657568813474341868652308942079804919287380422192892211131408793125422";
+
+    pub const OTHER_ASSET_ID: &str =
+        "99999999999999999999999999999999999999999999999999999999999999999";
     pub const MARKET: &str = "0xbd31dc8a20211944f6b70f31557f1001557b59905b7738480ca09bd4532f84af";
 
     pub fn book() -> Value {
@@ -236,6 +239,7 @@ mod market_channel {
     use rust_decimal_macros::dec;
 
     use super::*;
+    use crate::payloads::OTHER_ASSET_ID;
 
     #[tokio::test]
     async fn subscribe_orderbook_receives_book_updates() {
@@ -309,7 +313,6 @@ mod market_channel {
         let client = WebSocketClient::new(&endpoint, config).unwrap();
 
         let subscribed_asset = payloads::ASSET_ID;
-        let other_asset = "99999999999999999999999999999999999999999999999999999999999999999";
 
         let stream = client
             .subscribe_orderbook(vec![subscribed_asset.to_owned()])
@@ -320,7 +323,7 @@ mod market_channel {
 
         // Send message for non-subscribed asset (should be filtered)
         let mut other_book = payloads::book();
-        other_book["asset_id"] = serde_json::Value::String(other_asset.to_owned());
+        other_book["asset_id"] = serde_json::Value::String(OTHER_ASSET_ID.to_owned());
         server.send(&other_book.to_string());
 
         // Send message for subscribed asset
@@ -403,7 +406,10 @@ mod user_channel {
     use tokio::time::sleep;
 
     use super::*;
-    use crate::common::{API_KEY, PASSPHRASE, SECRET};
+    use crate::{
+        common::{API_KEY, PASSPHRASE, SECRET},
+        payloads::OTHER_ASSET_ID,
+    };
 
     fn test_credentials() -> Credentials {
         Credentials::new(API_KEY, SECRET.to_owned(), PASSPHRASE.to_owned())
@@ -582,7 +588,6 @@ mod user_channel {
         let client = WebSocketClient::new(&endpoint, WebSocketConfig::default()).unwrap();
 
         let asset_id = payloads::ASSET_ID;
-        let other_asset = "99999999999999999999999999999999999999999999999999999999999999999";
 
         // First subscription - should send request
         let _stream1 = client
@@ -598,13 +603,13 @@ mod user_channel {
 
         // Third subscription to DIFFERENT asset - should send request
         let _stream3 = client
-            .subscribe_orderbook(vec![other_asset.to_owned()])
+            .subscribe_orderbook(vec![OTHER_ASSET_ID.to_owned()])
             .unwrap();
 
         // The next message we receive should be for other_asset only
         let sub2 = server.recv_subscription().await.unwrap();
         assert!(
-            sub2.contains(other_asset),
+            sub2.contains(OTHER_ASSET_ID),
             "Should receive subscription for new asset"
         );
         assert!(
@@ -816,7 +821,7 @@ mod reconnection {
         let client = WebSocketClient::new(&endpoint, config()).unwrap();
 
         let asset1 = payloads::ASSET_ID;
-        let asset2 = "99999999999999999999999999999999999999999999999999999999999999999";
+        let asset2 = payloads::OTHER_ASSET_ID;
 
         // Subscribe to both assets
         let _stream1 = client.subscribe_orderbook(vec![asset1.to_owned()]).unwrap();

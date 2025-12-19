@@ -127,7 +127,7 @@ impl SubscriptionManager {
                     break;
                 }
                 _ => {
-                    // Other states are noop
+                    // Other states are no-op
                 }
             }
         }
@@ -184,7 +184,11 @@ impl SubscriptionManager {
         asset_ids: Vec<String>,
     ) -> Result<impl Stream<Item = Result<WsMessage>>> {
         if asset_ids.is_empty() {
-            return Err(WsError::SubscriptionFailed("asset_ids cannot be empty".to_owned()).into());
+            return Err(WsError::SubscriptionFailed(
+                "asset_ids cannot be empty: at least one asset ID must be provided for subscription"
+                    .to_owned(),
+            )
+            .into());
         }
 
         self.interest.add(MessageInterest::MARKET);
