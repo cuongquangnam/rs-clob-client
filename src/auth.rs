@@ -244,6 +244,10 @@ pub mod builder {
     }
 
     impl Builder {
+        pub fn new(config: Config, client: Client) -> Self {
+            Builder { config, client }
+        }
+
         pub(crate) async fn create_headers(
             &self,
             request: &Request,
