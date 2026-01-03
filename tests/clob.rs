@@ -12,10 +12,10 @@ use alloy::primitives::U256;
 use chrono::{DateTime, Utc};
 use httpmock::MockServer;
 use polymarket_client_sdk::POLYGON;
+use polymarket_client_sdk::clob::types::SignatureType;
 use polymarket_client_sdk::clob::{Client, Config};
-use polymarket_client_sdk::types::{SignatureType, TickSize};
+use polymarket_client_sdk::types::Decimal;
 use reqwest::StatusCode;
-use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use serde_json::json;
 use uuid::Uuid;
@@ -30,17 +30,19 @@ mod unauthenticated {
     use chrono::{TimeDelta, TimeZone as _};
     use futures_util::future;
     use futures_util::stream::StreamExt as _;
-    use polymarket_client_sdk::error::Status;
-    use polymarket_client_sdk::types::{
-        FeeRateResponseBuilder, LastTradePriceRequestBuilder, LastTradePriceResponseBuilder,
-        LastTradesPricesResponseBuilder, MarketResponse, MarketResponseBuilder,
-        MidpointRequestBuilder, MidpointResponseBuilder, MidpointsResponseBuilder,
-        NegRiskResponseBuilder, OrderBookSummaryRequestBuilder, OrderBookSummaryResponseBuilder,
-        OrderSummaryBuilder, PageBuilder, PriceRequestBuilder, PriceResponseBuilder,
-        PricesResponseBuilder, RewardsBuilder, Side, SimplifiedMarketResponseBuilder,
-        SpreadRequestBuilder, SpreadResponseBuilder, SpreadsResponseBuilder, TickSize,
-        TickSizeResponseBuilder, TokenBuilder,
+    use polymarket_client_sdk::clob::types::request::{
+        LastTradePriceRequest, MidpointRequest, OrderBookSummaryRequest, PriceHistoryRequest,
+        PriceRequest, SpreadRequest,
     };
+    use polymarket_client_sdk::clob::types::response::{
+        FeeRateResponse, GeoblockResponse, LastTradePriceResponse, LastTradesPricesResponse,
+        MarketResponse, MidpointResponse, MidpointsResponse, NegRiskResponse,
+        OrderBookSummaryResponse, OrderSummary, Page, PriceHistoryResponse, PricePoint,
+        PriceResponse, PricesResponse, Rewards, SimplifiedMarketResponse, SpreadResponse,
+        SpreadsResponse, TickSizeResponse, Token,
+    };
+    use polymarket_client_sdk::clob::types::{Interval, Side, TickSize};
+    use polymarket_client_sdk::error::Status;
     use reqwest::Method;
 
     use super::*;
@@ -94,10 +96,10 @@ mod unauthenticated {
                 .json_body(json!({ "mid": "0.5" }));
         });
 
-        let request = MidpointRequestBuilder::default().token_id("1").build()?;
+        let request = MidpointRequest::builder().token_id("1").build();
         let response = client.midpoint(&request).await?;
 
-        let expected = MidpointResponseBuilder::default().mid(dec!(0.5)).build()?;
+        let expected = MidpointResponse::builder().mid(dec!(0.5)).build();
 
         assert_eq!(response, expected);
         mock.assert();
@@ -119,12 +121,12 @@ mod unauthenticated {
             ));
         });
 
-        let request = MidpointRequestBuilder::default().token_id("1").build()?;
+        let request = MidpointRequest::builder().token_id("1").build();
         let response = client.midpoints(&[request]).await?;
 
-        let expected = MidpointsResponseBuilder::default()
+        let expected = MidpointsResponse::builder()
             .midpoints(HashMap::from_iter([("1".to_owned(), dec!(0.5))]))
-            .build()?;
+            .build();
 
         assert_eq!(response, expected);
         mock.assert();
@@ -146,21 +148,21 @@ mod unauthenticated {
                 .json_body(json!({ "price": "0.5" }));
         });
 
-        let request = PriceRequestBuilder::default()
+        let request = PriceRequest::builder()
             .token_id("1")
             .side(Side::Buy)
-            .build()?;
+            .build();
         let response = client.price(&request).await?;
 
-        let expected = PriceResponseBuilder::default().price(dec!(0.5)).build()?;
+        let expected = PriceResponse::builder().price(dec!(0.5)).build();
 
         assert_eq!(response, expected);
         mock.assert();
 
-        let request = PriceRequestBuilder::default()
+        let request = PriceRequest::builder()
             .token_id("1")
             .side(Side::Sell)
-            .build()?;
+            .build();
         let err = client.price(&request).await.unwrap_err();
         let status_err = err.downcast_ref::<Status>().unwrap();
 
@@ -193,13 +195,85 @@ mod unauthenticated {
         side_map.insert(Side::Buy, dec!(0.5));
         price_map.insert("1".to_owned(), side_map);
 
-        let request = PriceRequestBuilder::default()
+        let request = PriceRequest::builder()
             .token_id("1")
             .side(Side::Buy)
-            .build()?;
+            .build();
         let response = client.prices(&[request]).await?;
 
-        let expected = PricesResponseBuilder::default().prices(price_map).build()?;
+        let expected = PricesResponse::builder().prices(price_map).build();
+
+        assert_eq!(response, expected);
+        mock.assert();
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn all_prices_should_succeed() -> anyhow::Result<()> {
+        let server = MockServer::start();
+        let client = Client::new(&server.base_url(), Config::default())?;
+
+        let mock = server.mock(|when, then| {
+            when.method(httpmock::Method::GET).path("/prices");
+            then.status(StatusCode::OK)
+                .json_body(json!({ "1": { "BUY": 0.5, "SELL": 0.6 } }));
+        });
+
+        let response = client.all_prices().await?;
+
+        let mut price_map = HashMap::new();
+        let mut side_map = HashMap::new();
+        side_map.insert(Side::Buy, dec!(0.5));
+        side_map.insert(Side::Sell, dec!(0.6));
+        price_map.insert("1".to_owned(), side_map);
+
+        let expected = PricesResponse::builder().prices(price_map).build();
+
+        assert_eq!(response, expected);
+        mock.assert();
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn price_history_should_succeed() -> anyhow::Result<()> {
+        let server = MockServer::start();
+        let client = Client::new(&server.base_url(), Config::default())?;
+
+        let mock = server.mock(|when, then| {
+            when.method(httpmock::Method::GET)
+                .path("/prices-history")
+                .query_param("market", "0x123")
+                .query_param("startTs", "1000")
+                .query_param("endTs", "2000")
+                .query_param("interval", "1h")
+                .query_param("fidelity", "10");
+            then.status(StatusCode::OK).json_body(json!({
+                "history": [
+                    { "t": 1000, "p": "0.5" },
+                    { "t": 1500, "p": "0.55" },
+                    { "t": 2000, "p": "0.6" }
+                ]
+            }));
+        });
+
+        let request = PriceHistoryRequest::builder()
+            .market("0x123")
+            .start_ts(1000)
+            .end_ts(2000)
+            .interval(Interval::OneHour)
+            .fidelity(10_u32)
+            .build();
+        let response = client.price_history(&request).await?;
+
+        let expected = PriceHistoryResponse::builder()
+            .history(vec![
+                PricePoint::builder().t(1000).p(dec!(0.5)).build(),
+                PricePoint::builder().t(1500).p(dec!(0.55)).build(),
+                PricePoint::builder().t(2000).p(dec!(0.6)).build(),
+            ])
+            .build();
 
         assert_eq!(response, expected);
         mock.assert();
@@ -220,10 +294,10 @@ mod unauthenticated {
                 .json_body(json!({ "spread": "0.5" }));
         });
 
-        let request = SpreadRequestBuilder::default().token_id("1").build()?;
+        let request = SpreadRequest::builder().token_id("1").build();
         let response = client.spread(&request).await?;
 
-        let expected = SpreadResponseBuilder::default().spread(dec!(0.5)).build()?;
+        let expected = SpreadResponse::builder().spread(dec!(0.5)).build();
 
         assert_eq!(response, expected);
         mock.assert();
@@ -247,12 +321,10 @@ mod unauthenticated {
         let mut spread_map = HashMap::new();
         spread_map.insert("1".to_owned(), Decimal::TWO);
 
-        let request = SpreadRequestBuilder::default().token_id("1").build()?;
+        let request = SpreadRequest::builder().token_id("1").build();
         let response = client.spreads(&[request]).await?;
 
-        let expected = SpreadsResponseBuilder::default()
-            .spreads(spread_map)
-            .build()?;
+        let expected = SpreadsResponse::builder().spreads(spread_map).build();
 
         assert_eq!(response, expected);
         mock.assert();
@@ -275,9 +347,9 @@ mod unauthenticated {
 
         let response = client.tick_size("1").await?;
 
-        let expected = TickSizeResponseBuilder::default()
-            .minimum_tick_size(TickSize::Tenth.as_decimal())
-            .build()?;
+        let expected = TickSizeResponse::builder()
+            .minimum_tick_size(TickSize::Tenth)
+            .build();
 
         assert_eq!(response, expected);
         mock.assert();
@@ -300,7 +372,7 @@ mod unauthenticated {
 
         let response = client.neg_risk("1").await?;
 
-        let expected = NegRiskResponseBuilder::default().neg_risk(true).build()?;
+        let expected = NegRiskResponse::builder().neg_risk(true).build();
 
         assert_eq!(response, expected);
         mock.assert();
@@ -323,7 +395,7 @@ mod unauthenticated {
 
         let response = client.fee_rate_bps("1").await?;
 
-        let expected = FeeRateResponseBuilder::default().base_fee(0).build()?;
+        let expected = FeeRateResponse::builder().base_fee(0).build();
 
         assert_eq!(response, expected);
         mock.assert();
@@ -370,12 +442,10 @@ mod unauthenticated {
             }));
         });
 
-        let request = OrderBookSummaryRequestBuilder::default()
-            .token_id("1")
-            .build()?;
+        let request = OrderBookSummaryRequest::builder().token_id("1").build();
         let response = client.order_book(&request).await?;
 
-        let expected = OrderBookSummaryResponseBuilder::default()
+        let expected = OrderBookSummaryResponse::builder()
             .market("0xaabbcc")
             .neg_risk(false)
             .timestamp(Utc.timestamp_millis_opt(123_456_789).unwrap())
@@ -383,26 +453,26 @@ mod unauthenticated {
             .tick_size(TickSize::Hundredth)
             .asset_id("100")
             .bids(vec![
-                OrderSummaryBuilder::default()
+                OrderSummary::builder()
                     .price(dec!(0.3))
                     .size(Decimal::ONE_HUNDRED)
-                    .build()?,
-                OrderSummaryBuilder::default()
+                    .build(),
+                OrderSummary::builder()
                     .price(dec!(0.4))
                     .size(Decimal::ONE_HUNDRED)
-                    .build()?,
+                    .build(),
             ])
             .asks(vec![
-                OrderSummaryBuilder::default()
+                OrderSummary::builder()
                     .price(dec!(0.6))
                     .size(Decimal::ONE_HUNDRED)
-                    .build()?,
-                OrderSummaryBuilder::default()
+                    .build(),
+                OrderSummary::builder()
                     .price(dec!(0.7))
                     .size(Decimal::ONE_HUNDRED)
-                    .build()?,
+                    .build(),
             ])
-            .build()?;
+            .build();
 
         assert_eq!(response, expected);
         assert_eq!(
@@ -437,13 +507,11 @@ mod unauthenticated {
             }]));
         });
 
-        let request = OrderBookSummaryRequestBuilder::default()
-            .token_id("1")
-            .build()?;
+        let request = OrderBookSummaryRequest::builder().token_id("1").build();
         let response = client.order_books(&[request]).await?;
 
         let expected = vec![
-            OrderBookSummaryResponseBuilder::default()
+            OrderBookSummaryResponse::builder()
                 .market("market")
                 .neg_risk(false)
                 .timestamp(DateTime::<Utc>::UNIX_EPOCH + TimeDelta::milliseconds(1))
@@ -451,12 +519,12 @@ mod unauthenticated {
                 .tick_size(TickSize::Hundredth)
                 .asset_id("asset")
                 .asks(vec![
-                    OrderSummaryBuilder::default()
+                    OrderSummary::builder()
                         .price(Decimal::TWO)
                         .size(Decimal::ONE)
-                        .build()?,
+                        .build(),
                 ])
-                .build()?,
+                .build(),
         ];
 
         assert_eq!(response, expected);
@@ -478,15 +546,15 @@ mod unauthenticated {
                 .json_body(json!({ "price": 0.12, "side": "BUY" }));
         });
 
-        let request = LastTradePriceRequestBuilder::default()
+        let request = LastTradePriceRequest::builder()
             .token_id("1".to_owned())
-            .build()?;
+            .build();
         let response = client.last_trade_price(&request).await?;
 
-        let expected = LastTradePriceResponseBuilder::default()
+        let expected = LastTradePriceResponse::builder()
             .price(dec!(0.12))
             .side(Side::Buy)
-            .build()?;
+            .build();
 
         assert_eq!(response, expected);
         mock.assert();
@@ -507,17 +575,17 @@ mod unauthenticated {
                 .json_body(json!([{ "token_id": "1", "price": 0.12, "side": "BUY" }]));
         });
 
-        let request = LastTradePriceRequestBuilder::default()
+        let request = LastTradePriceRequest::builder()
             .token_id("1".to_owned())
-            .build()?;
+            .build();
         let response = client.last_trades_prices(&[request]).await?;
 
         let expected = vec![
-            LastTradesPricesResponseBuilder::default()
+            LastTradesPricesResponse::builder()
                 .token_id("1".to_owned())
                 .price(dec!(0.12))
                 .side(Side::Buy)
-                .build()?,
+                .build(),
         ];
 
         assert_eq!(response, expected);
@@ -589,7 +657,7 @@ mod unauthenticated {
 
         let response = client.market("1").await?;
 
-        let expected = MarketResponseBuilder::default()
+        let expected = MarketResponse::builder()
             .enable_order_book(true)
             .active(true)
             .closed(false)
@@ -615,28 +683,28 @@ mod unauthenticated {
             .icon("https://example.com/icon.png")
             .image("https://example.com/image.png")
             .rewards(
-                RewardsBuilder::default()
+                Rewards::builder()
                     .min_size(dec!(10.0))
                     .max_spread(dec!(0.05))
-                    .build()?,
+                    .build(),
             )
             .is_50_50_outcome(false)
             .tokens(vec![
-                TokenBuilder::default()
+                Token::builder()
                     .token_id("YES_TOKEN")
                     .outcome("YES")
                     .price(dec!(0.55))
                     .winner(false)
-                    .build()?,
-                TokenBuilder::default()
+                    .build(),
+                Token::builder()
                     .token_id("NO_TOKEN")
                     .outcome("NO")
                     .price(dec!(0.45))
                     .winner(false)
-                    .build()?,
+                    .build(),
             ])
             .tags(vec!["crypto".into(), "btc".into(), "price".into()])
-            .build()?;
+            .build();
 
         assert_eq!(response, expected);
         mock.assert();
@@ -714,7 +782,7 @@ mod unauthenticated {
 
         let response = client.sampling_markets(None).await?;
 
-        let market = MarketResponseBuilder::default()
+        let market = MarketResponse::builder()
             .enable_order_book(true)
             .active(true)
             .closed(false)
@@ -740,34 +808,34 @@ mod unauthenticated {
             .icon("https://example.com/icon.png")
             .image("https://example.com/image.png")
             .rewards(
-                RewardsBuilder::default()
+                Rewards::builder()
                     .min_size(dec!(10.0))
                     .max_spread(dec!(0.05))
-                    .build()?,
+                    .build(),
             )
             .is_50_50_outcome(false)
             .tokens(vec![
-                TokenBuilder::default()
+                Token::builder()
                     .token_id("YES_TOKEN")
                     .outcome("YES")
                     .price(dec!(0.55))
                     .winner(false)
-                    .build()?,
-                TokenBuilder::default()
+                    .build(),
+                Token::builder()
                     .token_id("NO_TOKEN")
                     .outcome("NO")
                     .price(dec!(0.45))
                     .winner(false)
-                    .build()?,
+                    .build(),
             ])
             .tags(vec!["crypto".into(), "btc".into(), "price".into()])
-            .build()?;
-        let expected = PageBuilder::default()
+            .build();
+        let expected = Page::builder()
             .data(vec![market])
             .next_cursor("next")
             .limit(1)
             .count(1)
-            .build()?;
+            .build();
 
         assert_eq!(response, expected);
         mock.assert();
@@ -820,42 +888,39 @@ mod unauthenticated {
 
         let response = client.simplified_markets(None).await?;
 
-        let simplified = SimplifiedMarketResponseBuilder::default()
+        let simplified = SimplifiedMarketResponse::builder()
             .condition_id("cond_12345")
             .tokens(vec![
-                TokenBuilder::default()
+                Token::builder()
                     .token_id("YES_TOKEN")
                     .outcome("YES")
                     .price(dec!(0.55))
                     .winner(false)
-                    .build()
-                    .unwrap(),
-                TokenBuilder::default()
+                    .build(),
+                Token::builder()
                     .token_id("NO_TOKEN")
                     .outcome("NO")
                     .price(dec!(0.45))
                     .winner(false)
-                    .build()
-                    .unwrap(),
+                    .build(),
             ])
             .rewards(
-                RewardsBuilder::default()
+                Rewards::builder()
                     .min_size(dec!(10.0))
                     .max_spread(dec!(0.05))
-                    .build()
-                    .unwrap(),
+                    .build(),
             )
             .archived(false)
             .accepting_orders(true)
             .active(true)
             .closed(false)
-            .build()?;
-        let expected = PageBuilder::default()
+            .build();
+        let expected = Page::builder()
             .data(vec![simplified])
             .next_cursor("next")
             .limit(1)
             .count(1)
-            .build()?;
+            .build();
 
         assert_eq!(response, expected);
         mock.assert();
@@ -908,42 +973,39 @@ mod unauthenticated {
 
         let response = client.sampling_simplified_markets(None).await?;
 
-        let simplified = SimplifiedMarketResponseBuilder::default()
+        let simplified = SimplifiedMarketResponse::builder()
             .condition_id("cond_12345")
             .tokens(vec![
-                TokenBuilder::default()
+                Token::builder()
                     .token_id("YES_TOKEN")
                     .outcome("YES")
                     .price(dec!(0.55))
                     .winner(false)
-                    .build()
-                    .unwrap(),
-                TokenBuilder::default()
+                    .build(),
+                Token::builder()
                     .token_id("NO_TOKEN")
                     .outcome("NO")
                     .price(dec!(0.45))
                     .winner(false)
-                    .build()
-                    .unwrap(),
+                    .build(),
             ])
             .rewards(
-                RewardsBuilder::default()
+                Rewards::builder()
                     .min_size(dec!(10.0))
                     .max_spread(dec!(0.05))
-                    .build()
-                    .unwrap(),
+                    .build(),
             )
             .archived(false)
             .accepting_orders(true)
             .active(true)
             .closed(false)
-            .build()?;
-        let expected = PageBuilder::default()
+            .build();
+        let expected = Page::builder()
             .data(vec![simplified])
             .next_cursor("next")
             .limit(1)
             .count(1)
-            .build()?;
+            .build();
 
         assert_eq!(response, expected);
         mock.assert();
@@ -1055,7 +1117,7 @@ mod unauthenticated {
             .collect()
             .await;
 
-        let market = MarketResponseBuilder::default()
+        let market = MarketResponse::builder()
             .enable_order_book(true)
             .active(true)
             .closed(false)
@@ -1081,28 +1143,28 @@ mod unauthenticated {
             .icon("https://example.com/icon.png")
             .image("https://example.com/image.png")
             .rewards(
-                RewardsBuilder::default()
+                Rewards::builder()
                     .min_size(dec!(10.0))
                     .max_spread(dec!(0.05))
-                    .build()?,
+                    .build(),
             )
             .is_50_50_outcome(false)
             .tokens(vec![
-                TokenBuilder::default()
+                Token::builder()
                     .token_id("YES_TOKEN")
                     .outcome("YES")
                     .price(dec!(0.55))
                     .winner(false)
-                    .build()?,
-                TokenBuilder::default()
+                    .build(),
+                Token::builder()
                     .token_id("NO_TOKEN")
                     .outcome("NO")
                     .price(dec!(0.45))
                     .winner(false)
-                    .build()?,
+                    .build(),
             ])
             .tags(vec!["crypto".into(), "btc".into(), "price".into()])
-            .build()?;
+            .build();
         let expected = vec![market.clone(), market];
 
         assert_eq!(response, expected);
@@ -1111,28 +1173,86 @@ mod unauthenticated {
 
         Ok(())
     }
+
+    #[tokio::test]
+    async fn check_geoblock_should_succeed() -> anyhow::Result<()> {
+        let server = MockServer::start();
+        let config = Config::builder().geoblock_host(server.base_url()).build();
+        let client = Client::new(&server.base_url(), config)?;
+
+        let mock = server.mock(|when, then| {
+            when.method(httpmock::Method::GET).path("/api/geoblock");
+            then.status(StatusCode::OK).json_body(json!({
+                "blocked": false,
+                "ip": "192.168.1.1",
+                "country": "US",
+                "region": "NY"
+            }));
+        });
+
+        let response = client.check_geoblock().await?;
+
+        let expected = GeoblockResponse::builder()
+            .blocked(false)
+            .ip("192.168.1.1".to_owned())
+            .country("US".to_owned())
+            .region("NY".to_owned())
+            .build();
+
+        assert_eq!(response, expected);
+        mock.assert();
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn check_geoblock_blocked_should_succeed() -> anyhow::Result<()> {
+        let server = MockServer::start();
+        let config = Config::builder().geoblock_host(server.base_url()).build();
+        let client = Client::new(&server.base_url(), config)?;
+
+        let mock = server.mock(|when, then| {
+            when.method(httpmock::Method::GET).path("/api/geoblock");
+            then.status(StatusCode::OK).json_body(json!({
+                "blocked": true,
+                "ip": "10.0.0.1",
+                "country": "CU",
+                "region": "HAV"
+            }));
+        });
+
+        let response = client.check_geoblock().await?;
+
+        assert!(response.blocked);
+        assert_eq!(response.country, "CU");
+        mock.assert();
+
+        Ok(())
+    }
 }
 
 mod authenticated {
-    use alloy::primitives::{Address, Signature, address};
+    use alloy::primitives::Signature;
     use alloy::signers::Signer as _;
     use alloy::signers::local::LocalSigner;
     use chrono::NaiveDate;
     use httpmock::Method::{DELETE, GET, POST};
-    use polymarket_client_sdk::clob::ConfigBuilder;
-    use polymarket_client_sdk::types::{
-        ApiKeysResponseBuilder, AssetType, BalanceAllowanceRequestBuilder,
-        BalanceAllowanceResponseBuilder, BanStatusResponseBuilder, CancelMarketOrderRequestBuilder,
-        CancelOrdersResponseBuilder, CurrentRewardResponseBuilder,
-        DeleteNotificationsRequestBuilder, EarningBuilder, MakerOrderBuilder,
-        MarketRewardResponseBuilder, MarketRewardsConfigBuilder, NotificationPayloadBuilder,
-        NotificationResponseBuilder, OpenOrderResponseBuilder, OrderScoringResponseBuilder,
-        OrderType, OrdersRequestBuilder, PageBuilder, PostOrderResponseBuilder,
-        RewardsConfigBuilder, Side, SignableOrder, SignedOrderBuilder, TokenBuilder,
-        TotalUserEarningResponseBuilder, TradeResponseBuilder, TraderSide, TradesRequestBuilder,
-        UserEarningResponseBuilder, UserRewardsEarningRequestBuilder,
-        UserRewardsEarningResponseBuilder,
+    use polymarket_client_sdk::clob::types::request::{
+        BalanceAllowanceRequest, CancelMarketOrderRequest, DeleteNotificationsRequest,
+        OrdersRequest, TradesRequest, UserRewardsEarningRequest,
     };
+    use polymarket_client_sdk::clob::types::response::{
+        ApiKeysResponse, BalanceAllowanceResponse, BanStatusResponse, CancelOrdersResponse,
+        CurrentRewardResponse, Earning, MakerOrder, MarketRewardResponse, MarketRewardsConfig,
+        NotificationPayload, NotificationResponse, OpenOrderResponse, OrderScoringResponse, Page,
+        PostOrderResponse, RewardsConfig, Token, TotalUserEarningResponse, TradeResponse,
+        UserEarningResponse, UserRewardsEarningResponse,
+    };
+    use polymarket_client_sdk::clob::types::{
+        AssetType, OrderStatusType, OrderType, Side, SignableOrder, SignedOrder, TickSize,
+        TraderSide,
+    };
+    use polymarket_client_sdk::types::{Address, address};
 
     use super::*;
     use crate::common::{
@@ -1157,9 +1277,7 @@ mod authenticated {
 
         let response = client.api_keys().await?;
 
-        let expected = ApiKeysResponseBuilder::default()
-            .keys(vec![API_KEY])
-            .build()?;
+        let expected = ApiKeysResponse::builder().keys(vec![API_KEY]).build();
 
         assert_eq!(response, expected);
         mock.assert();
@@ -1205,9 +1323,7 @@ mod authenticated {
 
         let response = client.closed_only_mode().await?;
 
-        let expected = BanStatusResponseBuilder::default()
-            .closed_only(true)
-            .build()?;
+        let expected = BanStatusResponse::builder().closed_only(true).build();
 
         assert_eq!(response, expected);
         mock.assert();
@@ -1241,7 +1357,7 @@ mod authenticated {
         });
 
         let funder = address!("0x995c9b1f779c04e65AF8ea3360F96c43b5e62316");
-        let config = ConfigBuilder::default().use_server_time(true).build()?;
+        let config = Config::builder().use_server_time(true).build();
         let client = Client::new(&server.base_url(), config)?
             .authentication_builder(&signer)
             .funder(funder)
@@ -1271,7 +1387,7 @@ mod authenticated {
 
         let signed_order = client.sign(&signer, signable_order.clone()).await?;
 
-        let expected = SignedOrderBuilder::default()
+        let expected = SignedOrder::builder()
             .owner(API_KEY)
             .order(signable_order.order)
             .order_type(OrderType::GTC)
@@ -1284,7 +1400,7 @@ mod authenticated {
                 )?,
                 false,
             ))
-            .build()?;
+            .build();
 
         assert_eq!(signed_order.order.taker, taker);
         assert_eq!(signed_order.order.maker, funder);
@@ -1313,56 +1429,95 @@ mod authenticated {
 
         let mock = server.mock(|when, then| {
             when.method(POST)
-                .path("/orders")
+                .path("/order")
                 .header(POLY_ADDRESS, client.address().to_string().to_lowercase())
                 .header(POLY_API_KEY, API_KEY)
                 .header(POLY_PASSPHRASE, PASSPHRASE)
-                .json_body(json!([
-                    {
-                        "order": {
-                            "expiration": "0",
-                            "feeRateBps": "0",
-                            "maker": Address::ZERO,
-                            "makerAmount": "0",
-                            "nonce": "0",
-                            "salt": 0,
-                            "side": Side::Buy,
-                            "signature": "0x0d18c04a653d89bf7375636adb7db69cffe362755960dc6ce8a0d46b04355b767958fae51c48e0e4b0908347442cb461e811d2f5a751303f7a8c1f75e17b3e701b",
-                            "signatureType": 0,
-                            "signer": Address::ZERO,
-                            "taker": Address::ZERO,
-                            "takerAmount": "0",
-                            "tokenId": "0"
-                        },
-                        "orderType": "FOK",
-                        "owner": "00000000-0000-0000-0000-000000000000"
-                    }
-                ]));
-            then.status(StatusCode::OK).json_body(json!([
-                {
-                    "error_msg": "",
-                    "makingAmount": "",
-                    "orderID": "0x23b457271bce9fa09b4f79125c9ec09e968235a462de82e318ef4eb6fe0ffeb0",
-                    "status": "live",
-                    "success": true,
-                    "takingAmount": ""
-                }
-            ]));
+                .json_body(json!({
+                    "order": {
+                        "expiration": "0",
+                        "feeRateBps": "0",
+                        "maker": Address::ZERO,
+                        "makerAmount": "0",
+                        "nonce": "0",
+                        "salt": 0,
+                        "side": Side::Buy,
+                        "signature": "0x0d18c04a653d89bf7375636adb7db69cffe362755960dc6ce8a0d46b04355b767958fae51c48e0e4b0908347442cb461e811d2f5a751303f7a8c1f75e17b3e701b",
+                        "signatureType": 0,
+                        "signer": Address::ZERO,
+                        "taker": Address::ZERO,
+                        "takerAmount": "0",
+                        "tokenId": "0"
+                    },
+                    "orderType": "FOK",
+                    "owner": "00000000-0000-0000-0000-000000000000"
+                }));
+            then.status(StatusCode::OK).json_body(json!({
+                "error_msg": "",
+                "makingAmount": "",
+                "orderID": "0x23b457271bce9fa09b4f79125c9ec09e968235a462de82e318ef4eb6fe0ffeb0",
+                "status": "live",
+                "success": true,
+                "takingAmount": ""
+            }));
         });
 
         let signer = LocalSigner::from_str(PRIVATE_KEY)?.with_chain_id(Some(POLYGON));
         let signed_order = client.sign(&signer, SignableOrder::default()).await?;
         let response = client.post_order(signed_order).await?;
 
-        let expected = vec![
-            PostOrderResponseBuilder::default()
-                .making_amount(Decimal::ZERO)
-                .taking_amount(Decimal::ZERO)
-                .order_id("0x23b457271bce9fa09b4f79125c9ec09e968235a462de82e318ef4eb6fe0ffeb0")
-                .status("live")
-                .success(true)
-                .build()?,
-        ];
+        let expected = PostOrderResponse::builder()
+            .making_amount(Decimal::ZERO)
+            .taking_amount(Decimal::ZERO)
+            .order_id("0x23b457271bce9fa09b4f79125c9ec09e968235a462de82e318ef4eb6fe0ffeb0")
+            .status(OrderStatusType::Live)
+            .success(true)
+            .build();
+
+        assert_eq!(response, expected);
+        mock.assert();
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn post_order_should_accept_transactions_hashes_alias() -> anyhow::Result<()> {
+        let server = MockServer::start();
+        let client = create_authenticated(&server).await?;
+
+        ensure_requirements(&server, "1", TickSize::Hundredth);
+
+        let mock = server.mock(|when, then| {
+            when.method(POST)
+                .path("/order")
+                .header(POLY_ADDRESS, client.address().to_string().to_lowercase())
+                .header(POLY_API_KEY, API_KEY)
+                .header(POLY_PASSPHRASE, PASSPHRASE);
+            then.status(StatusCode::OK).json_body(json!({
+                "error_msg": "",
+                "makingAmount": "100",
+                "orderID": "0x23b457271bce9fa09b4f79125c9ec09e968235a462de82e318ef4eb6fe0ffeb0",
+                "status": "matched",
+                "success": true,
+                "takingAmount": "50",
+                "transactionsHashes": ["0x2369f69af45a559ad6e769d3d209d2379af9d412315e27b9283594a6392557b6"]
+            }));
+        });
+
+        let signer = LocalSigner::from_str(PRIVATE_KEY)?.with_chain_id(Some(POLYGON));
+        let signed_order = client.sign(&signer, SignableOrder::default()).await?;
+        let response = client.post_order(signed_order).await?;
+
+        let expected = PostOrderResponse::builder()
+            .making_amount(Decimal::from(100))
+            .taking_amount(Decimal::from(50))
+            .order_id("0x23b457271bce9fa09b4f79125c9ec09e968235a462de82e318ef4eb6fe0ffeb0")
+            .status(OrderStatusType::Matched)
+            .success(true)
+            .transaction_hashes(vec![
+                "0x2369f69af45a559ad6e769d3d209d2379af9d412315e27b9283594a6392557b6".to_owned(),
+            ])
+            .build();
 
         assert_eq!(response, expected);
         mock.assert();
@@ -1377,7 +1532,7 @@ mod authenticated {
 
         let json = json!({
             "id": "1",
-            "status": "open",
+            "status": "LIVE",
             "owner": "ffffffff-ffff-ffff-ffff-ffffffffffff",
             "maker_address": "0x2222222222222222222222222222222222222222",
             "market": "market_abc",
@@ -1407,9 +1562,9 @@ mod authenticated {
 
         let response = client.order("1").await?;
 
-        let expected = OpenOrderResponseBuilder::default()
+        let expected = OpenOrderResponse::builder()
             .id("1")
-            .status("open")
+            .status(OrderStatusType::Live)
             .owner(Uuid::max())
             .maker_address(address!("0x2222222222222222222222222222222222222222"))
             .market("market_abc")
@@ -1423,7 +1578,7 @@ mod authenticated {
             .created_at("2024-01-15T12:34:56Z".parse().unwrap())
             .expiration("2024-01-20T00:00:00Z".parse().unwrap())
             .order_type(OrderType::GTD)
-            .build()?;
+            .build();
 
         assert_eq!(response, expected);
         mock.assert();
@@ -1440,7 +1595,7 @@ mod authenticated {
             "data": [
                 {
                     "id": "1",
-                    "status": "open",
+                    "status": "LIVE",
                     "owner": "ffffffff-ffff-ffff-ffff-ffffffffffff",
                     "maker_address": "0x2222222222222222222222222222222222222222",
                     "market": "market_abc",
@@ -1470,16 +1625,16 @@ mod authenticated {
                 .header(POLY_ADDRESS, client.address().to_string().to_lowercase())
                 .header(POLY_API_KEY, API_KEY)
                 .header(POLY_PASSPHRASE, PASSPHRASE)
-                .query_param("order_id", "1");
+                .query_param("id", "1");
             then.status(StatusCode::OK).json_body(json);
         });
 
-        let request = OrdersRequestBuilder::default().order_id("1").build()?;
+        let request = OrdersRequest::builder().order_id("1").build();
         let response = client.orders(&request, None).await?;
 
-        let order = OpenOrderResponseBuilder::default()
+        let order = OpenOrderResponse::builder()
             .id("1")
-            .status("open")
+            .status(OrderStatusType::Live)
             .owner(Uuid::max())
             .maker_address(address!("0x2222222222222222222222222222222222222222"))
             .market("market_abc")
@@ -1493,13 +1648,13 @@ mod authenticated {
             .created_at("2024-01-15T12:34:56Z".parse().unwrap())
             .expiration("2024-01-20T00:00:00Z".parse().unwrap())
             .order_type(OrderType::GTC)
-            .build()?;
-        let expected = PageBuilder::default()
+            .build();
+        let expected = Page::builder()
             .data(vec![order])
             .limit(1)
             .count(1)
             .next_cursor("next")
-            .build()?;
+            .build();
 
         assert_eq!(response, expected);
         mock.assert();
@@ -1530,12 +1685,48 @@ mod authenticated {
 
         let response = client.cancel_order("1").await?;
 
-        let expected = CancelOrdersResponseBuilder::default()
+        let expected = CancelOrdersResponse::builder()
             .not_canceled(HashMap::from_iter([(
                 "1".to_owned(),
                 "the order is already canceled".to_owned(),
             )]))
-            .build()?;
+            .build();
+
+        assert_eq!(response, expected);
+        mock.assert();
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn cancel_order_should_accept_snake_case_not_canceled() -> anyhow::Result<()> {
+        let server = MockServer::start();
+        let client = create_authenticated(&server).await?;
+
+        let mock = server.mock(|when, then| {
+            when.method(DELETE)
+                .path("/order")
+                .header(POLY_ADDRESS, client.address().to_string().to_lowercase())
+                .header(POLY_API_KEY, API_KEY)
+                .header(POLY_PASSPHRASE, PASSPHRASE)
+                .json_body(json!({ "orderId": "1" }));
+            then.status(StatusCode::OK).json_body(json!({
+                    "canceled": [],
+                    "not_canceled": {
+                        "1": "the order is already canceled"
+                    }
+                }
+            ));
+        });
+
+        let response = client.cancel_order("1").await?;
+
+        let expected = CancelOrdersResponse::builder()
+            .not_canceled(HashMap::from_iter([(
+                "1".to_owned(),
+                "the order is already canceled".to_owned(),
+            )]))
+            .build();
 
         assert_eq!(response, expected);
         mock.assert();
@@ -1563,9 +1754,9 @@ mod authenticated {
 
         let response = client.cancel_orders(&["1"]).await?;
 
-        let expected = CancelOrdersResponseBuilder::default()
+        let expected = CancelOrdersResponse::builder()
             .canceled(vec!["1".to_owned()])
-            .build()?;
+            .build();
 
         assert_eq!(response, expected);
         mock.assert();
@@ -1595,13 +1786,13 @@ mod authenticated {
 
         let response = client.cancel_all_orders().await?;
 
-        let expected = CancelOrdersResponseBuilder::default()
+        let expected = CancelOrdersResponse::builder()
             .canceled(vec!["2".to_owned()])
             .not_canceled(HashMap::from_iter([(
                 "1".to_owned(),
                 "the order is already canceled".to_owned(),
             )]))
-            .build()?;
+            .build();
 
         assert_eq!(response, expected);
 
@@ -1627,10 +1818,10 @@ mod authenticated {
             }));
         });
 
-        let request = CancelMarketOrderRequestBuilder::default()
+        let request = CancelMarketOrderRequest::builder()
             .market("m")
             .asset_id("a")
-            .build()?;
+            .build();
 
         client.cancel_market_orders(&request).await?;
 
@@ -1664,7 +1855,7 @@ mod authenticated {
                         "size": "12.5",
                         "fee_rate_bps": "5",
                         "price": "0.42",
-                        "status": "filled",
+                        "status": "MATCHED",
                         "match_time": "1705322096",
                         "last_update": "1705322130",
                         "outcome": "YES",
@@ -1705,13 +1896,10 @@ mod authenticated {
             }));
         });
 
-        let request = TradesRequestBuilder::default()
-            .id("1")
-            .market("market")
-            .build()?;
+        let request = TradesRequest::builder().id("1").market("market").build();
         let response = client.trades(&request, None).await?;
 
-        let trade = TradeResponseBuilder::default()
+        let trade = TradeResponse::builder()
             .id("1")
             .taker_order_id("taker_123")
             .market("market")
@@ -1720,7 +1908,7 @@ mod authenticated {
             .size(dec!(12.5))
             .fee_rate_bps(dec!(5))
             .price(dec!(0.42))
-            .status("filled")
+            .status(OrderStatusType::Matched)
             .match_time("2024-01-15T12:34:56Z".parse().unwrap())
             .last_update("2024-01-15T12:35:30Z".parse().unwrap())
             .outcome("YES")
@@ -1728,7 +1916,7 @@ mod authenticated {
             .owner(Uuid::max())
             .maker_address(address!("0x2222222222222222222222222222222222222222"))
             .maker_orders(vec![
-                MakerOrderBuilder::default()
+                MakerOrder::builder()
                     .order_id("maker_001")
                     .owner(Uuid::max())
                     .maker_address(address!("0x4444444444444444444444444444444444444444"))
@@ -1738,8 +1926,8 @@ mod authenticated {
                     .asset_id("asset_xyz")
                     .outcome("YES")
                     .side(Side::Sell)
-                    .build()?,
-                MakerOrderBuilder::default()
+                    .build(),
+                MakerOrder::builder()
                     .order_id("maker_002")
                     .owner(Uuid::max())
                     .maker_address(address!("0x6666666666666666666666666666666666666666"))
@@ -1749,17 +1937,17 @@ mod authenticated {
                     .asset_id("asset_xyz")
                     .outcome("YES")
                     .side(Side::Sell)
-                    .build()?,
+                    .build(),
             ])
             .transaction_hash("0xabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcd")
             .trader_side(TraderSide::Taker)
-            .build()?;
-        let expected = PageBuilder::default()
+            .build();
+        let expected = Page::builder()
             .limit(1)
             .count(1)
             .data(vec![trade])
             .next_cursor("next")
-            .build()?;
+            .build();
 
         assert_eq!(response, expected);
         mock.assert();
@@ -1813,10 +2001,10 @@ mod authenticated {
         let response = client.notifications().await?;
 
         let expected = vec![
-            NotificationResponseBuilder::default()
+            NotificationResponse::builder()
                 .r#type(1)
                 .owner(API_KEY)
-                .payload(NotificationPayloadBuilder::default()
+                .payload(NotificationPayload::builder()
                     .asset_id("71321045679252212594626385532706912750332728571942532289631379312455583992563")
                     .condition_id("0x5f65177b394277fd294cd75650044e32ba009a95022d88a0c1d565897d72f8f1")
                     .event_slug("will-trump-win-the-2024-iowa-caucus")
@@ -1840,9 +2028,9 @@ mod authenticated {
                         "0x3bc57dcae83a930df64fce8fdc46a8fca9b98af92a7b83a8a2f2c657446c2a71",
                     )
                     .order_type(OrderType::Unknown)
-                    .build()?
+                    .build()
                 )
-                .build()?,
+                .build(),
         ];
 
         assert_eq!(response, expected);
@@ -1866,9 +2054,9 @@ mod authenticated {
             then.status(StatusCode::OK).json_body(json!(null));
         });
 
-        let request = DeleteNotificationsRequestBuilder::default()
+        let request = DeleteNotificationsRequest::builder()
             .notification_ids(vec!["1".to_owned(), "2".to_owned()])
-            .build()?;
+            .build();
         client.delete_notifications(&request).await?;
 
         mock.assert();
@@ -1897,16 +2085,16 @@ mod authenticated {
             }));
         });
 
-        let request = BalanceAllowanceRequestBuilder::default()
+        let request = BalanceAllowanceRequest::builder()
             .asset_type(AssetType::Collateral)
             .token_id("1")
-            .build()?;
-        let response = client.balance_allowance(&request).await?;
+            .build();
+        let response = client.balance_allowance(request).await?;
 
-        let expected = BalanceAllowanceResponseBuilder::default()
+        let expected = BalanceAllowanceResponse::builder()
             .balance(Decimal::ZERO)
             .allowances(HashMap::from_iter([(Address::ZERO, "1".to_owned())]))
-            .build()?;
+            .build();
 
         assert_eq!(response, expected);
         mock.assert();
@@ -1931,11 +2119,11 @@ mod authenticated {
             then.status(StatusCode::OK).json_body(json!(null));
         });
 
-        let request = BalanceAllowanceRequestBuilder::default()
+        let request = BalanceAllowanceRequest::builder()
             .asset_type(AssetType::Collateral)
             .token_id("1")
-            .build()?;
-        client.update_balance_allowance(&request).await?;
+            .build();
+        client.update_balance_allowance(request).await?;
 
         mock.assert();
 
@@ -1961,9 +2149,7 @@ mod authenticated {
 
         let response = client.is_order_scoring("1").await?;
 
-        let expected = OrderScoringResponseBuilder::default()
-            .scoring(true)
-            .build()?;
+        let expected = OrderScoringResponse::builder().scoring(true).build();
 
         assert_eq!(response, expected);
         mock.assert();
@@ -1977,7 +2163,7 @@ mod authenticated {
         let client = create_authenticated(&server).await?;
 
         let mock = server.mock(|when, then| {
-            when.method(GET)
+            when.method(POST)
                 .path("/orders-scoring")
                 .header(POLY_ADDRESS, client.address().to_string().to_lowercase())
                 .header(POLY_API_KEY, API_KEY)
@@ -2027,21 +2213,21 @@ mod authenticated {
             }));
         });
 
-        let expected = PageBuilder::default()
+        let expected = Page::builder()
             .limit(1)
             .count(1)
             .next_cursor("next")
             .data(vec![
-                UserEarningResponseBuilder::default()
+                UserEarningResponse::builder()
                     .date(date)
                     .condition_id("1")
                     .asset_address(address!("0x0000000000000000000000000000000000000001"))
                     .maker_address(address!("0x0000000000000000000000000000000000000002"))
                     .earnings(Decimal::ONE)
                     .asset_rate(dec!(0.1))
-                    .build()?,
+                    .build(),
             ])
-            .build()?;
+            .build();
 
         let response = client.earnings_for_user_for_day(date, None).await?;
 
@@ -2077,13 +2263,13 @@ mod authenticated {
         let response = client.total_earnings_for_user_for_day(date).await?;
 
         let expected = vec![
-            TotalUserEarningResponseBuilder::default()
+            TotalUserEarningResponse::builder()
                 .date(date)
                 .asset_address(address!("0x0000000000000000000000000000000000000001"))
                 .maker_address(address!("0x0000000000000000000000000000000000000002"))
                 .earnings(Decimal::ONE)
                 .asset_rate(dec!(0.1))
-                .build()?,
+                .build(),
         ];
 
         assert_eq!(response, expected);
@@ -2169,15 +2355,15 @@ mod authenticated {
             ));
         });
 
-        let request = UserRewardsEarningRequestBuilder::default()
+        let request = UserRewardsEarningRequest::builder()
             .date(today.date_naive())
-            .build()?;
+            .build();
         let response = client
             .user_earnings_and_markets_config(&request, None)
             .await?;
 
         let expected = vec![
-            UserRewardsEarningResponseBuilder::default()
+            UserRewardsEarningResponse::builder()
                 .condition_id("cond_123")
                 .question("Will BTC be above $50k on December 31, 2025?")
                 .market_slug("btc-above-50k-2025-12-31")
@@ -2187,50 +2373,50 @@ mod authenticated {
                 .rewards_min_size(dec!(10.0))
                 .market_competitiveness(dec!(0.80))
                 .tokens(vec![
-                    TokenBuilder::default()
+                    Token::builder()
                         .token_id("YES_TOKEN")
                         .outcome("YES")
                         .price(dec!(0.55))
                         .winner(true)
-                        .build()?,
-                    TokenBuilder::default()
+                        .build(),
+                    Token::builder()
                         .token_id("NO_TOKEN")
                         .outcome("NO")
                         .price(dec!(0.45))
                         .winner(false)
-                        .build()?,
+                        .build(),
                 ])
                 .rewards_config(vec![
-                    RewardsConfigBuilder::default()
+                    RewardsConfig::builder()
                         .asset_address(address!("0x0000000000000000000000000000000000000001"))
                         .start_date("2024-01-01".parse().unwrap())
                         .end_date("2024-12-31".parse().unwrap())
                         .rate_per_day(dec!(1.5))
                         .total_rewards(dec!(500.0))
-                        .build()?,
-                    RewardsConfigBuilder::default()
+                        .build(),
+                    RewardsConfig::builder()
                         .asset_address(address!("0x0000000000000000000000000000000000000002"))
                         .start_date("2024-06-01".parse().unwrap())
                         .end_date("2024-12-31".parse().unwrap())
                         .rate_per_day(dec!(0.75))
                         .total_rewards(dec!(250.0))
-                        .build()?,
+                        .build(),
                 ])
                 .maker_address(address!("0x1111111111111111111111111111111111111111"))
                 .earning_percentage(dec!(0.25))
                 .earnings(vec![
-                    EarningBuilder::default()
+                    Earning::builder()
                         .asset_address(address!("0x0000000000000000000000000000000000000001"))
                         .earnings(dec!(125.0))
                         .asset_rate(dec!(1.5))
-                        .build()?,
-                    EarningBuilder::default()
+                        .build(),
+                    Earning::builder()
                         .asset_address(address!("0x0000000000000000000000000000000000000002"))
                         .earnings(dec!(62.5))
                         .asset_rate(dec!(0.75))
-                        .build()?,
+                        .build(),
                 ])
-                .build()?,
+                .build(),
         ];
 
         assert_eq!(response, expected);
@@ -2307,33 +2493,33 @@ mod authenticated {
 
         let response = client.current_rewards(None).await?;
 
-        let market_reward = CurrentRewardResponseBuilder::default()
+        let market_reward = CurrentRewardResponse::builder()
             .condition_id("cond_abc123")
             .rewards_max_spread(dec!(0.05))
             .rewards_min_size(dec!(20.0))
             .rewards_config(vec![
-                RewardsConfigBuilder::default()
+                RewardsConfig::builder()
                     .asset_address(address!("0x0000000000000000000000000000000000000001"))
                     .start_date("2024-01-01".parse().unwrap())
                     .end_date("2024-12-31".parse().unwrap())
                     .rate_per_day(dec!(2.0))
                     .total_rewards(dec!(750.0))
-                    .build()?,
-                RewardsConfigBuilder::default()
+                    .build(),
+                RewardsConfig::builder()
                     .asset_address(address!("0x0000000000000000000000000000000000000002"))
                     .start_date("2024-06-01".parse().unwrap())
                     .end_date("2024-12-31".parse().unwrap())
                     .rate_per_day(dec!(1.0))
                     .total_rewards(dec!(300.0))
-                    .build()?,
+                    .build(),
             ])
-            .build()?;
-        let expected = PageBuilder::default()
+            .build();
+        let expected = Page::builder()
             .limit(1)
             .count(1)
             .next_cursor("next")
             .data(vec![market_reward])
-            .build()?;
+            .build();
 
         assert_eq!(response, expected);
         mock.assert();
@@ -2410,7 +2596,7 @@ mod authenticated {
             .raw_rewards_for_market("1", Some("1".to_owned()))
             .await?;
 
-        let market_reward = MarketRewardResponseBuilder::default()
+        let market_reward = MarketRewardResponse::builder()
             .condition_id("1")
             .question("Will BTC reach $100k in 2025?")
             .market_slug("btc-100k-2025")
@@ -2420,46 +2606,46 @@ mod authenticated {
             .rewards_min_size(dec!(15.0))
             .market_competitiveness(dec!(0.05))
             .tokens(vec![
-                TokenBuilder::default()
+                Token::builder()
                     .token_id("YES_TOKEN")
                     .outcome("YES")
                     .price(dec!(0.58))
                     .winner(true)
-                    .build()?,
-                TokenBuilder::default()
+                    .build(),
+                Token::builder()
                     .token_id("NO_TOKEN")
                     .outcome("NO")
                     .price(dec!(0.42))
                     .winner(false)
-                    .build()?,
+                    .build(),
             ])
             .rewards_config(vec![
-                MarketRewardsConfigBuilder::default()
+                MarketRewardsConfig::builder()
                     .id("1")
                     .asset_address(address!("0x0000000000000000000000000000000000000001"))
-                    .start_date("2024-01-01".parse().unwrap())
-                    .end_date("2024-12-31".parse().unwrap())
+                    .start_date("2024-01-01".parse()?)
+                    .end_date("2024-12-31".parse()?)
                     .rate_per_day(dec!(1.25))
                     .total_rewards(dec!(400.0))
                     .total_days(Decimal::TEN)
-                    .build()?,
-                MarketRewardsConfigBuilder::default()
+                    .build(),
+                MarketRewardsConfig::builder()
                     .id("2")
                     .asset_address(address!("0x0000000000000000000000000000000000000002"))
-                    .start_date("2024-06-01".parse().unwrap())
-                    .end_date("2024-12-31".parse().unwrap())
+                    .start_date("2024-06-01".parse()?)
+                    .end_date("2024-12-31".parse()?)
                     .rate_per_day(dec!(0.80))
                     .total_rewards(dec!(200.0))
                     .total_days(Decimal::TEN)
-                    .build()?,
+                    .build(),
             ])
-            .build()?;
-        let expected = PageBuilder::default()
+            .build();
+        let expected = Page::builder()
             .limit(1)
             .count(1)
             .next_cursor("2")
             .data(vec![market_reward])
-            .build()?;
+            .build();
 
         assert_eq!(response, expected);
         mock.assert();
@@ -2473,11 +2659,11 @@ mod builder_authenticated {
     use alloy::signers::local::LocalSigner;
     use httpmock::Method::DELETE;
     use polymarket_client_sdk::auth::builder::Config as BuilderConfig;
-    use polymarket_client_sdk::clob::ConfigBuilder;
-    use polymarket_client_sdk::types::{
-        BuilderApiKeyResponseBuilder, BuilderTradeResponseBuilder, PageBuilder, Side,
-        TradesRequestBuilder,
+    use polymarket_client_sdk::clob::types::request::TradesRequest;
+    use polymarket_client_sdk::clob::types::response::{
+        BuilderApiKeyResponse, BuilderTradeResponse, Page,
     };
+    use polymarket_client_sdk::clob::types::{OrderStatusType, Side};
 
     use super::*;
     use crate::common::{
@@ -2511,7 +2697,7 @@ mod builder_authenticated {
                 .json_body(TIMESTAMP.parse::<i64>().unwrap());
         });
 
-        let config = ConfigBuilder::default().use_server_time(true).build()?;
+        let config = Config::builder().use_server_time(true).build();
         let builder_config = BuilderConfig::remote(&server.base_url(), Some("token".to_owned()))?;
         let client = Client::new(&server.base_url(), config)?
             .authentication_builder(&signer)
@@ -2558,10 +2744,10 @@ mod builder_authenticated {
         let response = client.builder_api_keys().await?;
 
         let expected = vec![
-            BuilderApiKeyResponseBuilder::default()
+            BuilderApiKeyResponse::builder()
                 .key(Uuid::nil())
                 .created_at(time)
-                .build()?,
+                .build(),
         ];
 
         assert_eq!(response, expected);
@@ -2598,7 +2784,7 @@ mod builder_authenticated {
                 .json_body(TIMESTAMP.parse::<i64>().unwrap());
         });
 
-        let config = ConfigBuilder::default().use_server_time(true).build()?;
+        let config = Config::builder().use_server_time(true).build();
         let builder_config = BuilderConfig::remote(&server.base_url(), Some("token".to_owned()))?;
         let client = Client::new(&server.base_url(), config)?
             .authentication_builder(&signer)
@@ -2668,7 +2854,7 @@ mod builder_authenticated {
                 .json_body(TIMESTAMP.parse::<i64>().unwrap());
         });
 
-        let config = ConfigBuilder::default().use_server_time(true).build()?;
+        let config = Config::builder().use_server_time(true).build();
         let builder_config = BuilderConfig::remote(&server.base_url(), Some("token".to_owned()))?;
         let client = Client::new(&server.base_url(), config)?
             .authentication_builder(&signer)
@@ -2716,7 +2902,7 @@ mod builder_authenticated {
                         "size": "10.0",
                         "sizeUsdc": "100.0",
                         "price": "0.45",
-                        "status": "filled",
+                        "status": "MATCHED",
                         "outcome": "YES",
                         "outcomeIndex": 0,
                         "owner": "ffffffff-ffff-ffff-ffff-ffffffffffff",
@@ -2737,13 +2923,10 @@ mod builder_authenticated {
             }));
         });
 
-        let request = TradesRequestBuilder::default()
-            .id("1")
-            .market("market")
-            .build()?;
+        let request = TradesRequest::builder().id("1").market("market").build();
         let response = client.builder_trades(&request, None).await?;
 
-        let trade = BuilderTradeResponseBuilder::default()
+        let trade = BuilderTradeResponse::builder()
             .id("1")
             .trade_type("limit")
             .taker_order_hash("0xtakerorderhash")
@@ -2754,26 +2937,26 @@ mod builder_authenticated {
             .size(dec!(10.0))
             .size_usdc(dec!(100.0))
             .price(dec!(0.45))
-            .status("filled")
+            .status(OrderStatusType::Matched)
             .outcome("YES")
             .outcome_index(0)
             .owner(Uuid::max())
             .maker("0x2222222222222222222222222222222222222222")
             .transaction_hash("0xabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcd")
-            .match_time("2025-09-22T22:19:57Z".parse().unwrap())
+            .match_time("2025-09-22T22:19:57Z".parse()?)
             .bucket_index(3)
             .fee(dec!(0.1))
             .fee_usdc(dec!(1.0))
             .err_msg("partial fill due to liquidity")
-            .created_at(Some("2024-01-15T12:30:00Z".parse().unwrap()))
-            .updated_at(Some("2024-01-15T12:35:00Z".parse().unwrap()))
-            .build()?;
-        let expected = PageBuilder::default()
+            .created_at("2024-01-15T12:30:00Z".parse()?)
+            .updated_at("2024-01-15T12:35:00Z".parse()?)
+            .build();
+        let expected = Page::builder()
             .limit(1)
             .count(1)
             .data(vec![trade])
             .next_cursor("next")
-            .build()?;
+            .build();
 
         assert_eq!(response, expected);
         mock.assert();

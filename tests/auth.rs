@@ -6,7 +6,7 @@ use alloy::signers::Signer as _;
 use alloy::signers::local::LocalSigner;
 use httpmock::MockServer;
 use polymarket_client_sdk::POLYGON;
-use polymarket_client_sdk::auth::Credentials;
+use polymarket_client_sdk::auth::{Credentials, ExposeSecret as _};
 use polymarket_client_sdk::clob::{Client, Config};
 use polymarket_client_sdk::error::{Synchronization, Validation};
 use reqwest::StatusCode;
@@ -158,10 +158,7 @@ async fn create_api_key_should_succeed() -> anyhow::Result<()> {
 
     let credentials = client.create_api_key(&signer, None).await?;
 
-    assert_eq!(
-        credentials,
-        Credentials::new(API_KEY, SECRET.to_owned(), PASSPHRASE.to_owned())
-    );
+    assert_eq!(credentials.key(), API_KEY);
     mock.assert();
 
     Ok(())
@@ -186,10 +183,7 @@ async fn derive_api_key_should_succeed() -> anyhow::Result<()> {
 
     let credentials = client.derive_api_key(&signer, None).await?;
 
-    assert_eq!(
-        credentials,
-        Credentials::new(API_KEY, SECRET.to_owned(), PASSPHRASE.to_owned())
-    );
+    assert_eq!(credentials.key(), API_KEY);
     mock.assert();
 
     Ok(())
@@ -218,12 +212,21 @@ async fn create_or_derive_api_key_should_succeed() -> anyhow::Result<()> {
 
     let credentials = client.create_or_derive_api_key(&signer, None).await?;
 
-    assert_eq!(
-        credentials,
-        Credentials::new(API_KEY, SECRET.to_owned(), PASSPHRASE.to_owned())
-    );
+    assert_eq!(credentials.key(), API_KEY);
     mock.assert();
     mock2.assert();
 
     Ok(())
+}
+
+#[test]
+fn credentials_secret_accessor_should_return_secret() {
+    let credentials = Credentials::new(API_KEY, SECRET.to_owned(), PASSPHRASE.to_owned());
+    assert_eq!(credentials.secret().expose_secret(), SECRET);
+}
+
+#[test]
+fn credentials_passphrase_accessor_should_return_passphrase() {
+    let credentials = Credentials::new(API_KEY, SECRET.to_owned(), PASSPHRASE.to_owned());
+    assert_eq!(credentials.passphrase().expose_secret(), PASSPHRASE);
 }

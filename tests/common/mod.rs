@@ -16,14 +16,11 @@ use alloy::signers::local::LocalSigner;
 use httpmock::MockServer;
 use polymarket_client_sdk::POLYGON;
 use polymarket_client_sdk::auth::Normal;
-use polymarket_client_sdk::clob::state::Authenticated;
-use polymarket_client_sdk::clob::{Client, Config, ConfigBuilder};
-use polymarket_client_sdk::types::{
-    FeeRateResponseBuilder, NegRiskResponseBuilder, SignatureType, TickSize,
-    TickSizeResponseBuilder,
-};
+use polymarket_client_sdk::auth::state::Authenticated;
+use polymarket_client_sdk::clob::types::{SignatureType, TickSize};
+use polymarket_client_sdk::clob::{Client, Config};
+use polymarket_client_sdk::types::Decimal;
 use reqwest::StatusCode;
-use rust_decimal::Decimal;
 use serde_json::json;
 use uuid::Uuid;
 
@@ -79,7 +76,7 @@ pub async fn create_authenticated(server: &MockServer) -> anyhow::Result<TestCli
             .json_body(TIMESTAMP.parse::<i64>().unwrap());
     });
 
-    let config = ConfigBuilder::default().use_server_time(true).build()?;
+    let config = Config::builder().use_server_time(true).build();
     let client = Client::new(&server.base_url(), config)?
         .authentication_builder(&signer)
         .authenticate()

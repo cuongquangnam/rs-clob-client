@@ -5,13 +5,14 @@ use std::str::FromStr as _;
 use alloy::signers::Signer as _;
 use alloy::signers::local::LocalSigner;
 use chrono::{TimeDelta, Utc};
-use polymarket_client_sdk::clob::{Client, ConfigBuilder};
-use polymarket_client_sdk::types::{
-    Amount, BalanceAllowanceRequest, OrderType, OrdersRequest, Side, TradesRequest,
-    UpdateBalanceAllowanceRequest, UserRewardsEarningRequestBuilder,
+use polymarket_client_sdk::clob::types::request::{
+    BalanceAllowanceRequest, OrdersRequest, TradesRequest, UpdateBalanceAllowanceRequest,
+    UserRewardsEarningRequest,
 };
+use polymarket_client_sdk::clob::types::{Amount, OrderType, Side};
+use polymarket_client_sdk::clob::{Client, Config};
+use polymarket_client_sdk::types::Decimal;
 use polymarket_client_sdk::{POLYGON, PRIVATE_KEY_VAR};
-use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 
 #[tokio::main]
@@ -21,7 +22,7 @@ async fn main() -> anyhow::Result<()> {
     let private_key = std::env::var(PRIVATE_KEY_VAR).expect("Need a private key");
     let signer = LocalSigner::from_str(&private_key)?.with_chain_id(Some(POLYGON));
 
-    let config = ConfigBuilder::default().use_server_time(true).build()?;
+    let config = Config::builder().use_server_time(true).build();
     let client = Client::new("https://clob.polymarket.com", config)?
         .authentication_builder(&signer)
         .authenticate()
@@ -60,13 +61,13 @@ async fn main() -> anyhow::Result<()> {
     println!(
         "balance -- {:#?}",
         client
-            .balance_allowance(&BalanceAllowanceRequest::default())
+            .balance_allowance(BalanceAllowanceRequest::default())
             .await
     );
     println!(
         "update balance -- {:#?}",
         client
-            .update_balance_allowance(&UpdateBalanceAllowanceRequest::default())
+            .update_balance_allowance(UpdateBalanceAllowanceRequest::default())
             .await
     );
 
@@ -113,9 +114,9 @@ async fn main() -> anyhow::Result<()> {
             .earnings_for_user_for_day(Utc::now().date_naive(), None)
             .await
     );
-    let request = UserRewardsEarningRequestBuilder::default()
+    let request = UserRewardsEarningRequest::builder()
         .date(Utc::now().date_naive() - TimeDelta::days(30))
-        .build()?;
+        .build();
     println!(
         "earnings -- {:?}",
         client

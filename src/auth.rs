@@ -4,24 +4,25 @@ use base64::engine::general_purpose::URL_SAFE;
 use hmac::{Hmac, Mac as _};
 use reqwest::header::HeaderMap;
 use reqwest::{Body, Request};
-use sec::Secret;
+pub use secrecy::{ExposeSecret, SecretString};
 use serde::Deserialize;
 use sha2::Sha256;
 use uuid::Uuid;
 
-use crate::types::ApiKey;
 use crate::{Result, Timestamp};
+
+pub type ApiKey = Uuid;
 
 /// Generic set of credentials used to authenticate to the Polymarket API. These credentials are
 /// returned when calling [`crate::clob::Client::create_or_derive_api_key`], [`crate::clob::Client::derive_api_key`], or
 /// [`crate::clob::Client::create_api_key`]. They are used by the [`crate::clob::state::Authenticated`] client to
 /// sign the [`Request`] when making calls to the API.
-#[derive(Clone, Debug, Default, Deserialize, PartialEq)]
+#[derive(Clone, Debug, Default, Deserialize)]
 pub struct Credentials {
     #[serde(alias = "apiKey")]
     pub(crate) key: ApiKey,
-    pub(crate) secret: Secret<String>,
-    pub(crate) passphrase: Secret<String>,
+    pub(crate) secret: SecretString,
+    pub(crate) passphrase: SecretString,
 }
 
 impl Credentials {
@@ -29,9 +30,70 @@ impl Credentials {
     pub fn new(key: Uuid, secret: String, passphrase: String) -> Self {
         Self {
             key,
-            secret: Secret::from(secret),
-            passphrase: Secret::from(passphrase),
+            secret: SecretString::from(secret),
+            passphrase: SecretString::from(passphrase),
         }
+    }
+
+    /// Returns the API key.
+    #[must_use]
+    pub fn key(&self) -> ApiKey {
+        self.key
+    }
+
+    /// Returns the secret.
+    #[must_use]
+    pub fn secret(&self) -> &SecretString {
+        &self.secret
+    }
+
+    /// Returns the passphrase.
+    #[must_use]
+    pub fn passphrase(&self) -> &SecretString {
+        &self.passphrase
+    }
+}
+
+/// Each [`Client`] can exist in one state at a time, i.e. [`state::Unauthenticated`] or
+/// [`state::Authenticated`].
+pub mod state {
+    use crate::auth::{Credentials, Kind};
+    use crate::types::Address;
+
+    /// The initial state of the [`super::Client`]
+    #[non_exhaustive]
+    #[derive(Clone, Debug)]
+    pub struct Unauthenticated;
+
+    /// The elevated state of the [`super::Client`]. Calling [`super::Client::authentication_builder`]
+    /// will return an [`super::AuthenticationBuilder`], which can be turned into
+    /// an authenticated clob via [`super::AuthenticationBuilder::authenticate`].
+    ///
+    /// See `examples/authenticated.rs` for more context.
+    #[non_exhaustive]
+    #[derive(Clone, Debug)]
+    pub struct Authenticated<K: Kind> {
+        /// The signer's address that created the credentials
+        pub(crate) address: Address,
+        /// The [`Credentials`]'s `secret` is used to generate an [`crate::signer::hmac`] which is
+        /// passed in the L2 headers ([`super::HeaderMap`]) `POLY_SIGNATURE` field.
+        pub(crate) credentials: Credentials,
+        /// The [`Kind`] that this [`Authenticated`] exhibits. Used to generate additional headers
+        /// for different types of authentication, e.g. Builder.
+        pub(crate) kind: K,
+    }
+
+    /// The clob state can only be [`Unauthenticated`] or [`Authenticated`].
+    pub trait State: sealed::Sealed {}
+
+    impl State for Unauthenticated {}
+    impl sealed::Sealed for Unauthenticated {}
+
+    impl<K: Kind> State for Authenticated<K> {}
+    impl<K: Kind> sealed::Sealed for Authenticated<K> {}
+
+    mod sealed {
+        pub trait Sealed {}
     }
 }
 
@@ -143,9 +205,10 @@ pub(crate) mod l2 {
     use alloy::hex::ToHexExt as _;
     use reqwest::Request;
     use reqwest::header::HeaderMap;
+    use secrecy::ExposeSecret as _;
 
+    use crate::auth::state::Authenticated;
     use crate::auth::{Kind, hmac, to_message};
-    use crate::clob::state::Authenticated;
     use crate::{Result, Timestamp};
 
     pub(crate) const POLY_ADDRESS: &str = "POLY_ADDRESS";
@@ -172,7 +235,7 @@ pub(crate) mod l2 {
         map.insert(POLY_API_KEY, state.credentials.key.to_string().parse()?);
         map.insert(
             POLY_PASSPHRASE,
-            state.credentials.passphrase.reveal().parse()?,
+            state.credentials.passphrase.expose_secret().parse()?,
         );
         map.insert(POLY_SIGNATURE, signature.parse()?);
         map.insert(POLY_TIMESTAMP, timestamp.to_string().parse()?);
@@ -189,6 +252,7 @@ pub(crate) mod l2 {
 pub mod builder {
     use reqwest::header::HeaderMap;
     use reqwest::{Client, Request};
+    use secrecy::ExposeSecret as _;
     use serde::{Deserialize, Serialize};
     use serde_json::json;
     use url::Url;
@@ -262,7 +326,7 @@ pub mod builder {
                     map.insert(POLY_BUILDER_API_KEY, credentials.key.to_string().parse()?);
                     map.insert(
                         POLY_BUILDER_PASSPHRASE,
-                        credentials.passphrase.reveal().parse()?,
+                        credentials.passphrase.expose_secret().parse()?,
                     );
                     map.insert(POLY_BUILDER_SIGNATURE, signature.parse()?);
                     map.insert(POLY_BUILDER_TIMESTAMP, timestamp.to_string().parse()?);
@@ -334,8 +398,8 @@ fn body_to_string(body: &Body) -> Option<String> {
         .map(|b| b.replace('\'', "\""))
 }
 
-fn hmac(secret: &Secret<String>, message: &str) -> Result<String> {
-    let decoded_secret = URL_SAFE.decode(secret.reveal())?;
+fn hmac(secret: &SecretString, message: &str) -> Result<String> {
+    let decoded_secret = URL_SAFE.decode(secret.expose_secret())?;
     let mut mac = Hmac::<Sha256>::new_from_slice(&decoded_secret)?;
     mac.update(message.as_bytes());
 
@@ -347,7 +411,6 @@ fn hmac(secret: &Secret<String>, message: &str) -> Result<String> {
 mod tests {
     use std::str::FromStr as _;
 
-    use alloy::primitives::address;
     use alloy::signers::Signer as _;
     use alloy::signers::local::LocalSigner;
     use reqwest::{Client, Method, RequestBuilder};
@@ -357,7 +420,8 @@ mod tests {
 
     use super::*;
     use crate::auth::builder::Config;
-    use crate::clob::state::Authenticated;
+    use crate::auth::state::Authenticated;
+    use crate::types::address;
     use crate::{AMOY, Result};
 
     // publicly known private key
@@ -395,10 +459,12 @@ mod tests {
             address: signer.address(),
             credentials: Credentials {
                 key: Uuid::nil(),
-                passphrase: Secret::new(
+                passphrase: SecretString::from(
                     "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_owned(),
                 ),
-                secret: Secret::new("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=".to_owned()),
+                secret: SecretString::from(
+                    "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=".to_owned(),
+                ),
             },
             kind: Normal,
         };
@@ -428,10 +494,10 @@ mod tests {
     async fn builder_headers_should_succeed() -> Result<()> {
         let credentials = Credentials {
             key: Uuid::nil(),
-            passphrase: Secret::new(
+            passphrase: SecretString::from(
                 "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_owned(),
             ),
-            secret: Secret::new("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=".to_owned()),
+            secret: SecretString::from("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=".to_owned()),
         };
         let config = Config::local(credentials);
         let request = Request::new(Method::GET, Url::parse("http://localhost/")?);
@@ -489,7 +555,7 @@ mod tests {
 
         let message = to_message(&request, 1_000_000);
         let signature = hmac(
-            &Secret::new("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=".to_owned()),
+            &SecretString::from("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=".to_owned()),
             &message,
         )?;
 
@@ -497,5 +563,35 @@ mod tests {
         assert_eq!(signature, "4gJVbox-R6XlDK4nlaicig0_ANVL1qdcahiL8CXfXLM=");
 
         Ok(())
+    }
+
+    #[test]
+    fn credentials_key_returns_api_key() {
+        let key = Uuid::new_v4();
+        let credentials = Credentials::new(key, "secret".to_owned(), "passphrase".to_owned());
+        assert_eq!(credentials.key(), key);
+    }
+
+    #[test]
+    fn debug_does_not_expose_secrets() {
+        let secret_value = "my_super_secret_value_12345";
+        let passphrase_value = "my_super_secret_passphrase_67890";
+        let credentials = Credentials::new(
+            Uuid::nil(),
+            secret_value.to_owned(),
+            passphrase_value.to_owned(),
+        );
+
+        let debug_output = format!("{credentials:?}");
+
+        // Verify that the secret values are NOT present in the debug output
+        assert!(
+            !debug_output.contains(secret_value),
+            "Debug output should NOT contain the secret value. Got: {debug_output}"
+        );
+        assert!(
+            !debug_output.contains(passphrase_value),
+            "Debug output should NOT contain the passphrase value. Got: {debug_output}"
+        );
     }
 }

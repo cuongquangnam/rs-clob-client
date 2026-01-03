@@ -2,21 +2,21 @@ use std::marker::PhantomData;
 use std::str::FromStr as _;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use alloy::primitives::{Address, U256};
+use alloy::primitives::U256;
 use chrono::{DateTime, Utc};
 use rand::Rng as _;
-use rust_decimal::Decimal;
 use rust_decimal::prelude::ToPrimitive as _;
 
 use crate::Result;
 use crate::auth::Kind as AuthKind;
+use crate::auth::state::Authenticated;
 use crate::clob::Client;
-use crate::clob::state::Authenticated;
-use crate::error::Error;
-use crate::types::{
-    Amount, AmountInner, Order, OrderBookSummaryRequest, OrderType, Side, SignableOrder,
-    SignatureType,
+use crate::clob::types::request::OrderBookSummaryRequest;
+use crate::clob::types::{
+    Amount, AmountInner, Order, OrderType, Side, SignableOrder, SignatureType,
 };
+use crate::error::Error;
+use crate::types::{Address, Decimal};
 
 pub(crate) const USDC_DECIMALS: u32 = 6;
 
@@ -110,6 +110,10 @@ impl<K: AuthKind> OrderBuilder<Limit, K> {
     }
 
     /// Validates and transforms this limit builder into a [`SignableOrder`]
+    #[cfg_attr(
+        feature = "tracing",
+        tracing::instrument(skip(self), err(level = "warn"))
+    )]
     pub async fn build(self) -> Result<SignableOrder> {
         let Some(token_id) = self.token_id.clone() else {
             return Err(Error::validation(
@@ -230,11 +234,21 @@ impl<K: AuthKind> OrderBuilder<Limit, K> {
             signatureType: self.signature_type as u8,
         };
 
+        #[cfg(feature = "tracing")]
+        tracing::debug!(token_id = %token_id, side = ?side, price = %price, size = %size, "limit order built");
+
         Ok(SignableOrder { order, order_type })
     }
 }
 
 impl<K: AuthKind> OrderBuilder<Market, K> {
+    /// Sets the price for this market builder. This is an optional field.
+    #[must_use]
+    pub fn price(mut self, price: Decimal) -> Self {
+        self.price = Some(price);
+        self
+    }
+
     /// Sets the [`Amount`] for this market order. This is a required field.
     #[must_use]
     pub fn amount(mut self, amount: Amount) -> Self {
@@ -262,6 +276,7 @@ impl<K: AuthKind> OrderBuilder<Market, K> {
             .client
             .order_book(&OrderBookSummaryRequest {
                 token_id: token_id.to_owned(),
+                side: None,
             })
             .await?;
 
@@ -272,10 +287,7 @@ impl<K: AuthKind> OrderBuilder<Market, K> {
         }
 
         let (levels, amount) = match side {
-            Side::Buy => match amount.0 {
-                a @ (AmountInner::Usdc(_) | AmountInner::Shares(_)) => (book.asks, a),
-            },
-
+            Side::Buy => (book.asks, amount.0),
             Side::Sell => match amount.0 {
                 a @ AmountInner::Shares(_) => (book.bids, a),
                 AmountInner::Usdc(_) => {
@@ -311,7 +323,11 @@ impl<K: AuthKind> OrderBuilder<Market, K> {
         }
     }
 
-    /// Validates and transforms this limit builder into a [`SignableOrder`]
+    /// Validates and transforms this market builder into a [`SignableOrder`]
+    #[cfg_attr(
+        feature = "tracing",
+        tracing::instrument(skip(self), err(level = "warn"))
+    )]
     pub async fn build(self) -> Result<SignableOrder> {
         let Some(token_id) = self.token_id.clone() else {
             return Err(Error::validation(
@@ -332,14 +348,11 @@ impl<K: AuthKind> OrderBuilder<Market, K> {
         let nonce = self.nonce.unwrap_or(0);
         let taker = self.taker.unwrap_or(Address::ZERO);
 
-        if let Some(price) = self.price {
-            return Err(Error::validation(format!(
-                "Unable to build Order due to supplied price {price}"
-            )));
-        }
-
         let order_type = self.order_type.unwrap_or(OrderType::FAK);
-        let price = self.calculate_price(order_type).await?;
+        let price = match self.price {
+            Some(price) => price,
+            None => self.calculate_price(order_type).await?,
+        };
 
         let minimum_tick_size = self
             .client
@@ -421,6 +434,9 @@ impl<K: AuthKind> OrderBuilder<Market, K> {
             expiration: U256::ZERO,
             signatureType: self.signature_type as u8,
         };
+
+        #[cfg(feature = "tracing")]
+        tracing::debug!(token_id = %token_id, side = ?side, price = %price, amount = %amount.as_inner(), "market order built");
 
         Ok(SignableOrder { order, order_type })
     }
