@@ -69,22 +69,25 @@ impl WsMessage {
 #[serde_as]
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct BookUpdate {
-    /// Asset/token identifier
-    pub asset_id: String,
     /// Market identifier
     pub market: String,
+    /// Asset/token identifier
+    pub asset_id: String,
     /// Unix timestamp in milliseconds
     #[serde_as(as = "DisplayFromStr")]
     pub timestamp: i64,
+    /// Hash for orderbook validation
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hash: Option<String>,
     /// Current bid levels (price descending)
     #[serde(default)]
     pub bids: Vec<OrderBookLevel>,
     /// Current ask levels (price ascending)
     #[serde(default)]
     pub asks: Vec<OrderBookLevel>,
-    /// Hash for orderbook validation
+    /// Last trade price
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub hash: Option<String>,
+    pub last_trade_price: Option<Decimal>,
 }
 
 /// Individual price level in an orderbook.
